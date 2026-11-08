@@ -14,6 +14,7 @@ mod function;
 mod init;
 mod inspector;
 mod isolate;
+mod locker;
 mod misc;
 mod module;
 mod object;
@@ -1696,7 +1697,7 @@ mod api_test {
     key: v8::Local<v8::Name>,
     value: v8::Local<v8::Value>,
     args: v8::PropertyCallbackArguments,
-    mut rv: v8::ReturnValue<()>,
+    mut rv: v8::ReturnValue<v8::Boolean>,
   ) -> v8::Intercepted {
     let key = key.to_rust_string_lossy(scope);
     if key == "seen" {

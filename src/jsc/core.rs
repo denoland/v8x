@@ -38,6 +38,10 @@ pub(crate) struct GcCallbackEntry {
 pub(crate) struct IsoState {
   pub group: JSContextGroupRef,
 
+  /// Serializes the threads that use this isolate, for `v8::Locker`. Unused
+  /// until the embedder converts the isolate with `try_into_shared`.
+  pub lock: super::locker::IsolateLock,
+
   pub contexts: Vec<JSGlobalContextRef>,
 
   pub owned_contexts: Vec<JSGlobalContextRef>,
@@ -70,6 +74,11 @@ pub(crate) struct IsoState {
   pub gc_prologue_callbacks: Vec<GcCallbackEntry>,
 
   pub gc_epilogue_callbacks: Vec<GcCallbackEntry>,
+
+  /// The canonical string for each distinct contents passed to
+  /// `String::InternalizeString`, protected until the isolate is disposed so
+  /// that internalizing equal strings always yields the same handle.
+  pub internalized: std::collections::HashMap<Vec<u16>, JSValueRef>,
 }
 
 thread_local! {
@@ -330,11 +339,53 @@ pub(crate) fn peek_pending_exception(iso: *mut RealIsolate) -> JSValueRef {
   st.pending_exception.map(|(_, v)| v).unwrap_or(ptr::null())
 }
 
+/// Calls the JS function that `src` evaluates to with `args` in `ctx`.
+///
+/// Returns `Err(exception)` if evaluating `src` or the call throws (the
+/// exception may be null if JSC reported none), so callers can choose whether
+/// to surface it as the isolate's pending exception.
+pub(crate) unsafe fn call_js_fn(
+  ctx: JSContextRef,
+  src: &std::ffi::CStr,
+  args: &[JSValueRef],
+) -> Result<JSValueRef, JSValueRef> {
+  if ctx.is_null() {
+    return Err(ptr::null());
+  }
+  unsafe {
+    let mut exc: JSValueRef = ptr::null();
+    let s = JSStringCreateWithUTF8CString(src.as_ptr());
+    let f =
+      JSEvaluateScript(ctx, s, ptr::null_mut(), ptr::null_mut(), 1, &mut exc);
+    JSStringRelease(s);
+    if !exc.is_null() || f.is_null() || !JSValueIsObject(ctx, f) {
+      return Err(exc);
+    }
+    let r = JSObjectCallAsFunction(
+      ctx,
+      f as JSObjectRef,
+      ptr::null_mut(),
+      args.len(),
+      if args.is_empty() {
+        ptr::null()
+      } else {
+        args.as_ptr()
+      },
+      &mut exc,
+    );
+    if !exc.is_null() || r.is_null() {
+      return Err(exc);
+    }
+    Ok(r)
+  }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Isolate__New(params: *const c_void) -> *mut RealIsolate {
   let group = unsafe { JSContextGroupCreate() };
   let state = Box::new(IsoState {
     group,
+    lock: super::locker::IsolateLock::new(),
     contexts: Vec::new(),
     owned_contexts: Vec::new(),
     handles: Vec::new(),
@@ -348,12 +399,85 @@ pub extern "C" fn v8__Isolate__New(params: *const c_void) -> *mut RealIsolate {
     weak_handles: Vec::new(),
     gc_prologue_callbacks: Vec::new(),
     gc_epilogue_callbacks: Vec::new(),
+    internalized: std::collections::HashMap::new(),
   });
   let iso = Box::into_raw(state) as *mut RealIsolate;
   // Arm the execution-time-limit watchdog so `TerminateExecution` and the
   // near-heap-limit callback have a JSC-side hook to fire through.
   crate::jsc::terminate::install(iso, group, heap_limit_from_params(params));
   iso
+}
+
+// Isolate groups. V8 partitions isolates into groups that each own a pointer
+// compression cage; JSC has no such cage, and every isolate here already owns
+// its own `JSContextGroupRef`. So there is exactly one process-wide group, the
+// default one, and V8's answer for a build without multi-cage pointer
+// compression applies: `CanCreateNewGroups` is false. The `IsolateGroup`
+// handle Rust holds is that group's address; it carries no reference count,
+// so cloning and destroying it are free.
+
+static DEFAULT_ISOLATE_GROUP: u8 = 0;
+
+#[inline]
+fn default_isolate_group() -> *const c_void {
+  &DEFAULT_ISOLATE_GROUP as *const u8 as *const c_void
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__IsolateGroup__GetDefault() -> *const c_void {
+  default_isolate_group()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__IsolateGroup__CanCreateNewGroups() -> bool {
+  false
+}
+
+/// Unreachable through rusty_v8, which checks `CanCreateNewGroups` first
+/// because V8 aborts here. Answer with the only group there is.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__IsolateGroup__Create() -> *const c_void {
+  default_isolate_group()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__IsolateGroup__CLONE(
+  this: *const *const c_void,
+) -> *const c_void {
+  if this.is_null() {
+    return default_isolate_group();
+  }
+  unsafe { *this }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__IsolateGroup__DESTRUCT(_this: *mut *const c_void) {}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__IsolateGroup__EQ(
+  this: *const *const c_void,
+  other: *const *const c_void,
+) -> bool {
+  if this.is_null() || other.is_null() {
+    return this == other;
+  }
+  unsafe { *this == *other }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Isolate__GetGroup(
+  _isolate: *const RealIsolate,
+) -> *const c_void {
+  default_isolate_group()
+}
+
+/// Every isolate is in the default group, so this is `Isolate::New`.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Isolate__NewInGroup(
+  _group: *const *const c_void,
+  params: *const c_void,
+) -> *mut RealIsolate {
+  v8__Isolate__New(params)
 }
 
 /// Pull the configured max heap size out of a raw `CreateParams` pointer, if
@@ -402,6 +526,11 @@ pub extern "C" fn v8__Isolate__Dispose(this: *mut RealIsolate) {
         JSValueUnprotect(ctx, v);
       }
     }
+    if !st.base_ctx.is_null() {
+      for (_, v) in st.internalized.drain() {
+        JSValueUnprotect(st.base_ctx, v);
+      }
+    }
     for ctx in st.owned_contexts.drain(..) {
       JSGlobalContextRelease(ctx);
     }
@@ -429,6 +558,17 @@ pub extern "C" fn v8__Isolate__Exit(_this: *mut RealIsolate) {
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Isolate__GetCurrent() -> *mut RealIsolate {
   current_iso()
+}
+
+/// Unlike `GetCurrent`, this reports only an isolate that is actually entered.
+/// `current_iso` falls back to the last isolate this thread ran, which is what
+/// callbacks arriving outside an Enter/Exit pair need, but `v8::Locker` uses
+/// this to assert that no isolate is entered before it takes the lock, and
+/// that fallback would make the assert fire on a thread that had merely used
+/// an isolate earlier.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Isolate__TryGetCurrent() -> *mut RealIsolate {
+  CURRENT_ISO.with(|c| *c.borrow())
 }
 
 #[unsafe(no_mangle)]

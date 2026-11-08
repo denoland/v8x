@@ -80,11 +80,27 @@ unsafe fn make_string_from_utf16(
   }
 }
 
+/// The context to create a string in. V8 creates strings on a bare
+/// `HandleScope` too, so fall back to the isolate's base context when none is
+/// entered.
+fn creation_ctx(isolate: *mut RealIsolate) -> JSContextRef {
+  let ctx = current_ctx();
+  if !ctx.is_null() {
+    return ctx;
+  }
+  let isolate = if isolate.is_null() {
+    current_iso()
+  } else {
+    isolate
+  };
+  crate::jsc::core::ensure_ctx(isolate)
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__String__Empty(
   isolate: *mut RealIsolate,
 ) -> *const V8String {
-  let ctx = current_ctx();
+  let ctx = creation_ctx(isolate);
   unsafe {
     let s = JSStringCreateWithUTF8CString(c"".as_ptr());
     let v = JSValueMakeString(ctx, s);
@@ -100,7 +116,7 @@ pub extern "C" fn v8__String__NewFromUtf8(
   _new_type: NewStringType,
   length: int,
 ) -> *const V8String {
-  let ctx = current_ctx();
+  let ctx = creation_ctx(isolate);
   if length < 0 || data.is_null() {
     return ptr::null();
   }
@@ -122,7 +138,7 @@ pub extern "C" fn v8__String__NewFromOneByte(
   _new_type: NewStringType,
   length: int,
 ) -> *const V8String {
-  let ctx = current_ctx();
+  let ctx = creation_ctx(isolate);
   if length < 0 || data.is_null() {
     return ptr::null();
   }
@@ -142,7 +158,7 @@ pub extern "C" fn v8__String__NewFromTwoByte(
   _new_type: NewStringType,
   length: int,
 ) -> *const V8String {
-  let ctx = current_ctx();
+  let ctx = creation_ctx(isolate);
   if length < 0 || data.is_null() {
     return ptr::null();
   }
@@ -261,7 +277,7 @@ pub extern "C" fn v8__String__Write_v2(
     return;
   }
   let null_terminate =
-    crate::binding::v8_String_WriteFlags_kNullTerminate as int;
+    crate::binding::v8__String__WriteFlags__kNullTerminate as int;
   let ctx = current_ctx();
   unsafe {
     let s = JSValueToStringCopy(ctx, jsval(this), ptr::null_mut());
@@ -297,7 +313,7 @@ pub extern "C" fn v8__String__WriteOneByte_v2(
     return;
   }
   let null_terminate =
-    crate::binding::v8_String_WriteFlags_kNullTerminate as int;
+    crate::binding::v8__String__WriteFlags__kNullTerminate as int;
   let ctx = current_ctx();
   unsafe {
     let s = JSValueToStringCopy(ctx, jsval(this), ptr::null_mut());
@@ -464,30 +480,26 @@ pub extern "C" fn v8__String__GetExternalStringResourceBase(
   out
 }
 
+/// Mirrors `v8::String::ValueView` from `v8-primitive.h`. rusty_v8 v152.0.0
+/// stopped calling the `data`/`length`/`is_one_byte` accessors and now reads
+/// these fields straight out of the buffer handed to `CONSTRUCT`: a pointer,
+/// the data pointer, a `u32` length, then a `bool`. `onebyte_owned` occupies
+/// the trailing word V8 uses as padding, keeping the whole thing inside
+/// `v8__String__ValueView_SIZE` (32).
 #[repr(C)]
 struct ValueViewRepr {
   js_string: JSStringRef,
   data: *const c_void,
-
-  length_and_flag: usize,
+  len: u32,
+  is_one_byte: bool,
 
   onebyte_owned: *mut u8,
 }
 
-const ONE_BYTE_FLAG: usize = 1usize << 63;
-
 impl ValueViewRepr {
   #[inline]
-  fn pack(len: usize, is_one_byte: bool) -> usize {
-    (len & !ONE_BYTE_FLAG) | if is_one_byte { ONE_BYTE_FLAG } else { 0 }
-  }
-  #[inline]
   fn length(&self) -> usize {
-    self.length_and_flag & !ONE_BYTE_FLAG
-  }
-  #[inline]
-  fn is_one_byte(&self) -> bool {
-    self.length_and_flag & ONE_BYTE_FLAG != 0
+    self.len as usize
   }
 }
 
@@ -504,7 +516,8 @@ pub extern "C" fn v8__String__ValueView__CONSTRUCT(
       (*repr) = ValueViewRepr {
         js_string: ptr::null_mut(),
         data: ptr::null(),
-        length_and_flag: ValueViewRepr::pack(0, true),
+        len: 0 as u32,
+        is_one_byte: true,
         onebyte_owned: ptr::null_mut(),
       };
       return;
@@ -514,7 +527,8 @@ pub extern "C" fn v8__String__ValueView__CONSTRUCT(
       (*repr) = ValueViewRepr {
         js_string: ptr::null_mut(),
         data: ptr::null(),
-        length_and_flag: ValueViewRepr::pack(0, true),
+        len: 0 as u32,
+        is_one_byte: true,
         onebyte_owned: ptr::null_mut(),
       };
       return;
@@ -543,14 +557,16 @@ pub extern "C" fn v8__String__ValueView__CONSTRUCT(
       (*repr) = ValueViewRepr {
         js_string: s,
         data: ptr as *const c_void,
-        length_and_flag: ValueViewRepr::pack(len, true),
+        len: len as u32,
+        is_one_byte: true,
         onebyte_owned: ptr,
       };
     } else {
       (*repr) = ValueViewRepr {
         js_string: s,
         data: chars as *const c_void,
-        length_and_flag: ValueViewRepr::pack(len, false),
+        len: len as u32,
+        is_one_byte: false,
         onebyte_owned: ptr::null_mut(),
       };
     }
@@ -574,32 +590,8 @@ pub extern "C" fn v8__String__ValueView__DESTRUCT(
       (*repr).js_string = ptr::null_mut();
     }
     (*repr).data = ptr::null();
-    (*repr).length_and_flag = 0;
+    (*repr).len = 0;
   }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn v8__String__ValueView__is_one_byte(
-  this: *const crate::string::ValueView,
-) -> bool {
-  let repr = this as *const ValueViewRepr;
-  unsafe { (*repr).is_one_byte() }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn v8__String__ValueView__data(
-  this: *const crate::string::ValueView,
-) -> *const c_void {
-  let repr = this as *const ValueViewRepr;
-  unsafe { (*repr).data }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn v8__String__ValueView__length(
-  this: *const crate::string::ValueView,
-) -> int {
-  let repr = this as *const ValueViewRepr;
-  unsafe { (*repr).length() as int }
 }
 
 #[unsafe(no_mangle)]
@@ -794,6 +786,83 @@ pub extern "C" fn v8__String__Concat(
     let v = make_string_from_utf16(ctx, units.as_ptr(), units.len());
     intern_ctx::<V8String>(ctx, v)
   }
+}
+
+/// The UTF-16 code units of the string value `v`, or `None` if it cannot be
+/// converted.
+unsafe fn utf16_units(ctx: JSContextRef, v: JSValueRef) -> Option<Vec<u16>> {
+  unsafe {
+    let s = JSValueToStringCopy(ctx, v, ptr::null_mut());
+    if s.is_null() {
+      return None;
+    }
+    let len = JSStringGetLength(s);
+    let chars = JSStringGetCharactersPtr(s);
+    let units = if chars.is_null() || len == 0 {
+      Vec::new()
+    } else {
+      std::slice::from_raw_parts(chars, len).to_vec()
+    };
+    JSStringRelease(s);
+    Some(units)
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__String__StringEquals(
+  this: *const V8String,
+  that: *const V8String,
+) -> bool {
+  if this.is_null() || that.is_null() {
+    return this == that;
+  }
+  if this == that {
+    return true;
+  }
+  let ctx = crate::jsc::core::ensure_ctx(current_iso());
+  if ctx.is_null() {
+    return false;
+  }
+  // Strict equality on two strings compares their contents.
+  unsafe { JSValueIsStrictEqual(ctx, jsval(this), jsval(that)) }
+}
+
+/// JSC exposes no string table, so the isolate keeps its own: the first
+/// string internalized with given contents becomes the canonical handle for
+/// them, which makes equal internalized strings the same handle as in V8.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__String__InternalizeString(
+  this: *const V8String,
+  isolate: *mut RealIsolate,
+) -> *const V8String {
+  if this.is_null() {
+    return ptr::null();
+  }
+  let isolate = if isolate.is_null() {
+    current_iso()
+  } else {
+    isolate
+  };
+  if isolate.is_null() {
+    return this;
+  }
+  // Protect the canonical value against the base context, which lives until
+  // `Isolate::Dispose` releases these first.
+  let st = iso_state(isolate);
+  if st.base_ctx.is_null() {
+    st.base_ctx =
+      unsafe { JSGlobalContextCreateInGroup(st.group, ptr::null_mut()) };
+  }
+  let base = st.base_ctx as JSContextRef;
+  let Some(units) = (unsafe { utf16_units(base, jsval(this)) }) else {
+    return this;
+  };
+  let v = *st.internalized.entry(units).or_insert_with(|| {
+    let v = jsval(this);
+    unsafe { JSValueProtect(base, v) };
+    v
+  });
+  intern::<V8String>(v)
 }
 
 #[unsafe(no_mangle)]

@@ -28,7 +28,7 @@ use std::ptr;
 use std::sync::OnceLock;
 
 const K_NULL_TERMINATE: int =
-  crate::binding::v8_String_WriteFlags_kNullTerminate as int;
+  crate::binding::v8__String__WriteFlags__kNullTerminate as int;
 const K_MAX_STRING_LENGTH: usize =
   crate::binding::v8__String__kMaxLength as usize;
 
@@ -735,10 +735,19 @@ pub extern "C" fn v8__String__Length(this: *const V8String) -> c_int {
   count as c_int
 }
 
+/// Mirrors `v8::String::ValueView` from `v8-primitive.h`, because rusty_v8
+/// v152.0.0 stopped calling the `data`/`length`/`is_one_byte` accessors and
+/// now reads these fields straight out of the buffer it hands to `CONSTRUCT`:
+/// a pointer, the data pointer, a `u32` length, then a `bool`. The trailing
+/// word is V8 padding and this backend leaves it alone. Total size must stay
+/// within `v8__String__ValueView_SIZE` (32).
 #[repr(C)]
 pub(super) struct ViewState {
+  /// V8 keeps `Local<v8::String> flat_str_` here. QuickJS owns a transcoded
+  /// copy instead, so the slot stays null.
+  flat_str: *mut c_void,
   data: *mut c_void,
-  len: usize,
+  len: u32,
   is_one_byte: bool,
 }
 
@@ -774,8 +783,9 @@ pub extern "C" fn v8__String__ValueView__CONSTRUCT(
     Box::into_raw(units.into_boxed_slice()) as *mut c_void
   };
   unsafe {
+    (*buf).flat_str = ptr::null_mut();
     (*buf).data = data;
-    (*buf).len = len;
+    (*buf).len = len as u32;
     (*buf).is_one_byte = is_one_byte;
   }
 }
@@ -785,11 +795,12 @@ pub extern "C" fn v8__String__ValueView__DESTRUCT(this: *mut ViewState) {
   unsafe {
     let st = &mut *this;
     if !st.data.is_null() {
+      let len = st.len as usize;
       if st.is_one_byte {
-        let slice = ptr::slice_from_raw_parts_mut(st.data as *mut u8, st.len);
+        let slice = ptr::slice_from_raw_parts_mut(st.data as *mut u8, len);
         drop(Box::from_raw(slice));
       } else {
-        let slice = ptr::slice_from_raw_parts_mut(st.data as *mut u16, st.len);
+        let slice = ptr::slice_from_raw_parts_mut(st.data as *mut u16, len);
         drop(Box::from_raw(slice));
       }
       st.data = ptr::null_mut();
@@ -797,27 +808,6 @@ pub extern "C" fn v8__String__ValueView__DESTRUCT(this: *mut ViewState) {
       st.is_one_byte = true;
     }
   }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn v8__String__ValueView__is_one_byte(
-  this: *const ViewState,
-) -> bool {
-  unsafe { !this.is_null() && (*this).is_one_byte }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn v8__String__ValueView__data(
-  this: *const ViewState,
-) -> *const std::ffi::c_void {
-  unsafe { (*this).data as *const std::ffi::c_void }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn v8__String__ValueView__length(
-  this: *const ViewState,
-) -> c_int {
-  unsafe { (*this).len as c_int }
 }
 
 // ---------------------------------------------------------------------------
@@ -925,4 +915,53 @@ mod tests {
     assert_eq!(locale_compare("2", "10", false), Ordering::Greater);
     assert_eq!(locale_compare("a2", "a10", true), Ordering::Less);
   }
+}
+
+unsafe extern "C" {
+  fn JS_IsStrictEqual(ctx: *mut JSContext, op1: JSValue, op2: JSValue) -> bool;
+  fn JS_ValueToAtom(ctx: *mut JSContext, val: JSValue) -> JSAtom;
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__String__StringEquals(
+  this: *const V8String,
+  that: *const V8String,
+) -> bool {
+  if this.is_null() || that.is_null() {
+    return false;
+  }
+  if ptr::eq(this, that) {
+    return true;
+  }
+  let ctx = current_ctx();
+  if ctx.is_null() {
+    return false;
+  }
+  unsafe { JS_IsStrictEqual(ctx, jsval_of(this), jsval_of(that)) }
+}
+
+/// QuickJS interns strings as atoms, so the atom's string is the canonical
+/// copy: equal inputs come back as one and the same string value.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__String__InternalizeString(
+  this: *const V8String,
+  isolate: *mut RealIsolate,
+) -> *const V8String {
+  let ctx = ctx_for(isolate);
+  if ctx.is_null() || this.is_null() {
+    return ptr::null();
+  }
+  let value = jsval_of(this);
+  let atom = unsafe { JS_ValueToAtom(ctx, value) };
+  if atom == 0 {
+    unsafe { super::exception::clear_pending(ctx) };
+    return super::core::intern_dup::<V8String>(ctx, value);
+  }
+  let internalized = unsafe { JS_AtomToString(ctx, atom) };
+  unsafe { JS_FreeAtom(ctx, atom) };
+  if internalized.tag == JS_TAG_EXCEPTION {
+    unsafe { super::exception::clear_pending(ctx) };
+    return super::core::intern_dup::<V8String>(ctx, value);
+  }
+  intern::<V8String>(internalized)
 }

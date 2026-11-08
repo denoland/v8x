@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 use temporal_rs::{Instant, TimeZone};
 use timezone_provider::zoneinfo64::ZoneInfo64TzdbProvider;
 
-fn provider() -> &'static ZoneInfo64TzdbProvider<'static> {
+pub(crate) fn provider() -> &'static ZoneInfo64TzdbProvider<'static> {
   static PROVIDER: OnceLock<ZoneInfo64TzdbProvider<'static>> = OnceLock::new();
   PROVIDER.get_or_init(|| {
     ZoneInfo64TzdbProvider::zoneinfo64_provider_for_testing()

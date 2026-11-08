@@ -125,6 +125,32 @@ pub extern "C" fn v8__Object__GetPrototype(
   intern_ctx::<Value>(ctx, v)
 }
 
+/// The first object on `this`'s prototype chain, starting at `this` itself,
+/// that is an instance of `tmpl` (see `FunctionTemplate::HasInstance`).
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Object__FindInstanceInPrototypeChain(
+  this: *const Object,
+  tmpl: *const crate::FunctionTemplate,
+) -> *const Object {
+  let ctx = current_ctx();
+  let mut o = obj_of(ctx, this);
+  if o.is_null() || tmpl.is_null() {
+    return ptr::null();
+  }
+  // Bounded so that a pathological chain cannot hang the embedder.
+  for _ in 0..100_000 {
+    if crate::jsc::function::template_has_instance(ctx, tmpl, o as JSValueRef) {
+      return intern_ctx::<Object>(ctx, o as JSValueRef);
+    }
+    let proto = unsafe { JSObjectGetPrototype(ctx, o) };
+    if proto.is_null() || !unsafe { JSValueIsObject(ctx, proto) } {
+      break;
+    }
+    o = proto as JSObjectRef;
+  }
+  ptr::null()
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Object__Set(
   this: *const Object,
@@ -590,6 +616,43 @@ pub extern "C" fn v8__Array__New_with_elements(
     }
     intern_ctx::<Array>(ctx, arr as JSValueRef)
   }
+}
+
+/// Visits the elements in index order, reading each through `[[Get]]` as
+/// V8's slow path does. Returns false if a read threw or the callback
+/// reported an exception, true otherwise (including on `Break`).
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Array__Iterate(
+  this: *const Array,
+  context: *const Context,
+  callback: unsafe extern "C" fn(
+    index: u32,
+    element: *const Value,
+    data: *mut c_void,
+  ) -> crate::ArrayIterationResult,
+  callback_data: *mut c_void,
+) -> bool {
+  let ctx = ctx_of(context) as JSContextRef;
+  let o = obj_of(ctx, this as *const Object);
+  if ctx.is_null() || o.is_null() {
+    return false;
+  }
+  let length = v8__Array__Length(this);
+  for i in 0..length {
+    let mut exc: JSValueRef = ptr::null();
+    let v = unsafe { JSObjectGetPropertyAtIndex(ctx, o, i, &mut exc) };
+    if !exc.is_null() {
+      crate::jsc::core::record_pending_exception(ctx, exc);
+      return false;
+    }
+    let element = intern_ctx::<Value>(ctx, v);
+    match unsafe { callback(i, element, callback_data) } {
+      crate::ArrayIterationResult::Continue => {}
+      crate::ArrayIterationResult::Break => return true,
+      crate::ArrayIterationResult::Exception => return false,
+    }
+  }
+  true
 }
 
 #[unsafe(no_mangle)]
@@ -1192,6 +1255,62 @@ pub extern "C" fn v8__Set__Add(
   this
 }
 
+// Callable objects (rusty_v8 v152.0.0, denoland/rusty_v8#1893). JSC makes no
+// distinction between a function object and a callable object, so these
+// delegate to the `Function` implementations.
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Object__IsCallable(this: *const Object) -> bool {
+  let ctx = current_ctx();
+  if ctx.is_null() || this.is_null() {
+    return false;
+  }
+  let obj = obj_of(ctx, this);
+  !obj.is_null() && unsafe { JSObjectIsFunction(ctx, obj) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Object__IsConstructor(this: *const Object) -> bool {
+  let ctx = current_ctx();
+  if ctx.is_null() || this.is_null() {
+    return false;
+  }
+  let obj = obj_of(ctx, this);
+  !obj.is_null() && unsafe { JSObjectIsConstructor(ctx, obj) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Object__CallAsFunction(
+  this: *const Object,
+  context: *const Context,
+  recv: *const Value,
+  argc: int,
+  argv: *const *const Value,
+) -> *const Value {
+  crate::jsc::function::v8__Function__Call(
+    this as *const crate::Function,
+    context,
+    recv,
+    argc,
+    argv,
+  )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Object__CallAsConstructor(
+  this: *const Object,
+  context: *const Context,
+  argc: int,
+  argv: *const *const Value,
+) -> *const Value {
+  crate::jsc::function::v8__Function__NewInstance(
+    this as *const crate::Function,
+    context,
+    argc,
+    argv,
+  ) as *const Value
+}
+
 // ---------------------------------------------------------------------------
 // Link-stubs for v8 C-ABI symbols that `test_api.rs` references but this
 // backend doesn't implement yet. Each returns a benign default
@@ -1273,15 +1392,27 @@ pub extern "C" fn v8__Object__InternalFieldCount(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Object__SetAccessor(
-  _this: *const std::os::raw::c_void,
-  _context: *const std::os::raw::c_void,
-  _key: *const std::os::raw::c_void,
-  _getter: *const std::os::raw::c_void,
-  _setter: *const std::os::raw::c_void,
-  _data_or_null: *const std::os::raw::c_void,
-  _attr: crate::PropertyAttribute,
+  this: *const Object,
+  context: *const Context,
+  key: *const Name,
+  getter: crate::AccessorNameGetterCallback,
+  setter: Option<crate::AccessorNameSetterCallback>,
+  data_or_null: *const Value,
+  attr: crate::PropertyAttribute,
 ) -> crate::support::MaybeBool {
-  crate::support::MaybeBool::Nothing
+  if crate::jsc::function::object_set_native(
+    context,
+    this,
+    key,
+    getter,
+    setter,
+    data_or_null,
+    attr,
+  ) {
+    MaybeBool::JustTrue
+  } else {
+    MaybeBool::Nothing
+  }
 }
 
 #[unsafe(no_mangle)]
@@ -1303,41 +1434,152 @@ pub extern "C" fn v8__Object__SetInternalField(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Object__SetLazyDataProperty(
-  _this: *const std::os::raw::c_void,
-  _context: *const std::os::raw::c_void,
-  _key: *const std::os::raw::c_void,
-  _getter: *const std::os::raw::c_void,
-  _data_or_null: *const std::os::raw::c_void,
-  _attr: crate::PropertyAttribute,
+  this: *const Object,
+  context: *const Context,
+  key: *const Name,
+  getter: crate::AccessorNameGetterCallback,
+  data_or_null: *const Value,
+  attr: crate::PropertyAttribute,
   _getter_side_effect_type: crate::SideEffectType,
   _setter_side_effect_type: crate::SideEffectType,
 ) -> crate::support::MaybeBool {
-  crate::support::MaybeBool::Nothing
+  if crate::jsc::function::object_set_lazy(
+    context,
+    this,
+    key,
+    getter,
+    data_or_null,
+    attr,
+  ) {
+    MaybeBool::JustTrue
+  } else {
+    MaybeBool::Nothing
+  }
 }
 
+/// `RegExp.prototype.exec`: the match array, or `null` when nothing matches.
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__RegExp__Exec(
-  _this: *const std::os::raw::c_void,
-  _context: *const std::os::raw::c_void,
-  _subject: *const std::os::raw::c_void,
-) -> *const std::os::raw::c_void {
-  std::ptr::null()
+  this: *const crate::RegExp,
+  context: *const Context,
+  subject: *const String,
+) -> *const Object {
+  let ctx = ctx_of(context) as JSContextRef;
+  if ctx.is_null() || this.is_null() || subject.is_null() {
+    return ptr::null();
+  }
+  match unsafe {
+    crate::jsc::core::call_js_fn(
+      ctx,
+      c"(function(r,s){return RegExp.prototype.exec.call(r,s)})",
+      &[jsval(this), jsval(subject)],
+    )
+  } {
+    Ok(v) => intern_ctx::<Object>(ctx, v),
+    Err(exc) => {
+      crate::jsc::core::record_pending_exception(ctx, exc);
+      ptr::null()
+    }
+  }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__RegExp__GetSource(
-  _this: *const std::os::raw::c_void,
-) -> *const std::os::raw::c_void {
-  std::ptr::null()
+  this: *const crate::RegExp,
+) -> *const String {
+  let ctx = current_ctx();
+  if ctx.is_null() || this.is_null() {
+    return ptr::null();
+  }
+  match unsafe {
+    crate::jsc::core::call_js_fn(
+      ctx,
+      c"(function(r){return r.source})",
+      &[jsval(this)],
+    )
+  } {
+    Ok(v) => intern_ctx::<String>(ctx, v),
+    Err(_) => ptr::null(),
+  }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__RegExp__New(
-  _context: *const std::os::raw::c_void,
-  _pattern: *const std::os::raw::c_void,
-  _flags: crate::RegExpCreationFlags,
-) -> *const std::os::raw::c_void {
-  std::ptr::null()
+  context: *const Context,
+  pattern: *const String,
+  flags: crate::RegExpCreationFlags,
+) -> *const crate::RegExp {
+  new_regexp(context, pattern, flags)
+}
+
+/// Builds `new RegExp(pattern, flags)`. A pattern or flag combination JS
+/// rejects leaves the SyntaxError pending and returns an empty handle.
+fn new_regexp(
+  context: *const Context,
+  pattern: *const String,
+  flags: crate::RegExpCreationFlags,
+) -> *const crate::RegExp {
+  use crate::RegExpCreationFlags as F;
+  let ctx = ctx_of(context) as JSContextRef;
+  if ctx.is_null() || pattern.is_null() {
+    return ptr::null();
+  }
+  // In the order `RegExp.prototype.flags` reports them.
+  let mut f = std::string::String::new();
+  for (bit, c) in [
+    (F::HAS_INDICES, 'd'),
+    (F::GLOBAL, 'g'),
+    (F::IGNORE_CASE, 'i'),
+    (F::MULTILINE, 'm'),
+    (F::DOT_ALL, 's'),
+    (F::UNICODE, 'u'),
+    (F::UNICODE_SETS, 'v'),
+    (F::STICKY, 'y'),
+  ] {
+    if flags.contains(bit) {
+      f.push(c);
+    }
+  }
+  // `LINEAR` selects V8's non-backtracking engine, which only changes how a
+  // match is found, not its result; JSC has a single engine.
+  let Ok(cflags) = std::ffi::CString::new(f) else {
+    return ptr::null();
+  };
+  unsafe {
+    let fs = JSStringCreateWithUTF8CString(cflags.as_ptr());
+    let fv = JSValueMakeString(ctx, fs);
+    JSStringRelease(fs);
+    let args = [jsval(pattern), fv];
+    let mut exc: JSValueRef = ptr::null();
+    let re = JSObjectMakeRegExp(ctx, 2, args.as_ptr(), &mut exc);
+    if !exc.is_null() || re.is_null() {
+      crate::jsc::core::record_pending_exception(ctx, exc);
+      return ptr::null();
+    }
+    intern_ctx::<crate::RegExp>(ctx, re as JSValueRef)
+  }
+}
+
+/// JSC has no per-regexp backtrack budget, so there is no Smi-range bound to
+/// report; this is the 31-bit Smi maximum V8 uses without pointer
+/// compression, which leaves rusty_v8 its headroom check.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__RegExp__MAX_BACKTRACK_LIMIT() -> u32 {
+  i32::MAX as u32
+}
+
+/// The limit cannot be honoured: JSC's Yarr engine has no per-regexp
+/// backtrack budget. The regexp is otherwise the one `RegExp::New` builds,
+/// so a pattern that would exceed the limit runs to completion instead of
+/// failing the match.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__RegExp__NewWithBacktrackLimit(
+  context: *const Context,
+  pattern: *const String,
+  flags: crate::RegExpCreationFlags,
+  _backtrack_limit: u32,
+) -> *const crate::RegExp {
+  new_regexp(context, pattern, flags)
 }
 
 #[unsafe(no_mangle)]

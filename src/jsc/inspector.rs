@@ -165,6 +165,187 @@ pub extern "C" fn v8_inspector__V8InspectorSession__cancelPauseOnNextStatement(
 ) {
 }
 
+/// An owned `Runtime.RemoteObject`. V8 hands back an opaque C++ object that
+/// serializes on demand; this backend serializes eagerly and carries the bytes,
+/// which is all `toBytes` needs.
+pub(crate) struct RemoteObjectBytes(Vec<u8>);
+
+/// Wraps `value` in a `Runtime.RemoteObject`. Objects get an `objectId` the
+/// session can resolve again with `unwrapObject`, and stay alive until their
+/// object group is released, as V8's injected script keeps them.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8_inspector__V8InspectorSession__wrapObject(
+  session: *mut RawV8InspectorSession,
+  context: *const Context,
+  value: *const Value,
+  object_group: StringView,
+  _generate_preview: bool,
+) -> *mut RemoteObjectBytes {
+  use crate::jsc::jsc_sys::*;
+  if value.is_null() {
+    return std::ptr::null_mut();
+  }
+  let ctx = if context.is_null() {
+    crate::jsc::core::current_ctx()
+  } else {
+    crate::jsc::core::ctx_of(context) as JSContextRef
+  };
+  let v = crate::jsc::core::jsval(value);
+  let ty = if ctx.is_null() {
+    "object"
+  } else {
+    match unsafe { JSValueGetType(ctx, v) } {
+      t if t == kJSTypeUndefined => "undefined",
+      t if t == kJSTypeBoolean => "boolean",
+      t if t == kJSTypeNumber => "number",
+      t if t == kJSTypeString => "string",
+      t if t == kJSTypeSymbol => "symbol",
+      t if t == kJSTypeBigInt => "bigint",
+      t if t == kJSTypeObject
+        && unsafe { JSObjectIsFunction(ctx, v as JSObjectRef) } =>
+      {
+        "function"
+      }
+      _ => "object",
+    }
+  };
+  let is_object = !ctx.is_null()
+    && unsafe { JSValueIsObject(ctx, v) }
+    && !unsafe { JSValueIsNull(ctx, v) };
+  let json = if is_object && !session.is_null() {
+    let sess = unsafe { &mut *(session.cast::<cdp::CdpSession>()) };
+    unsafe { JSValueProtect(ctx, v) };
+    let id = sess.add_remote_object(cdp::RemoteRef {
+      value: v,
+      context,
+      ctx,
+      group: string_view_to_utf16(&object_group),
+    });
+    format!(r#"{{"type":"{ty}","objectId":"{id}"}}"#)
+  } else {
+    format!(r#"{{"type":"{ty}"}}"#)
+  };
+  Box::into_raw(Box::new(RemoteObjectBytes(json.into_bytes())))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8_inspector__V8InspectorSession__unwrapObject(
+  session: *mut RawV8InspectorSession,
+  error: *mut *mut StringBuffer,
+  object_id: StringView,
+  value: *mut *const Value,
+  context: *mut *const Context,
+  object_group: *mut *mut StringBuffer,
+) -> bool {
+  let id = string_view_to_string(&object_id);
+  let found = if session.is_null() {
+    None
+  } else {
+    let sess = unsafe { &*(session.cast::<cdp::CdpSession>()) };
+    sess
+      .remote_object(&id)
+      .map(|r| (r.value, r.context, r.ctx, r.group.clone()))
+  };
+  let Some((v, ctx_handle, ctx, group)) = found else {
+    if !error.is_null() {
+      let units: Vec<u16> = "Invalid remote object id".encode_utf16().collect();
+      unsafe { *error = RealStringBuffer::boxed_from_utf16(units) };
+    }
+    return false;
+  };
+  unsafe {
+    if !value.is_null() {
+      *value = crate::jsc::core::intern_ctx::<Value>(ctx, v);
+    }
+    if !context.is_null() {
+      *context = ctx_handle;
+    }
+    if !object_group.is_null() {
+      *object_group = RealStringBuffer::boxed_from_utf16(group);
+    }
+  }
+  true
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8_inspector__RemoteObject__DELETE(
+  this: *mut RemoteObjectBytes,
+) {
+  if !this.is_null() {
+    drop(unsafe { Box::from_raw(this) });
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8_inspector__RemoteObject__toBytes(
+  this: *const RemoteObjectBytes,
+) -> *mut crate::crdtp_shim::CppVecU8 {
+  let bytes = if this.is_null() {
+    Vec::new()
+  } else {
+    unsafe { &*this }.0.clone()
+  };
+  Box::into_raw(Box::new(bytes))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8_inspector__V8InspectorSession__releaseObjectGroup(
+  session: *mut RawV8InspectorSession,
+  object_group: StringView,
+) {
+  if session.is_null() {
+    return;
+  }
+  let sess = unsafe { &mut *(session.cast::<cdp::CdpSession>()) };
+  for r in sess.release_group(&string_view_to_utf16(&object_group)) {
+    unsafe { crate::jsc::jsc_sys::JSValueUnprotect(r.ctx, r.value) };
+  }
+}
+
+unsafe extern "C" {
+  /// Defined by the vendored `inspector.rs`; releases the boxed Rust closure
+  /// an `Inspectable` was built from.
+  fn v8_inspector__V8InspectorSession__Inspectable__BASE__DROP(
+    rust_impl: *mut c_void,
+  );
+}
+
+/// Owns the Rust closure behind an `Inspectable` until it is deleted.
+pub(crate) struct InspectableHandle(*mut c_void);
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8_inspector__V8InspectorSession__Inspectable__NEW(
+  rust_impl: *mut c_void,
+) -> *mut InspectableHandle {
+  Box::into_raw(Box::new(InspectableHandle(rust_impl)))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8_inspector__V8InspectorSession__Inspectable__DELETE(
+  inspectable: *mut InspectableHandle,
+) {
+  if inspectable.is_null() {
+    return;
+  }
+  let handle = unsafe { Box::from_raw(inspectable) };
+  if !handle.0.is_null() {
+    unsafe {
+      v8_inspector__V8InspectorSession__Inspectable__BASE__DROP(handle.0);
+    }
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8_inspector__V8InspectorSession__addInspectedObject(
+  _session: *mut RawV8InspectorSession,
+  inspectable: *mut InspectableHandle,
+) {
+  // V8 keeps the object so the console can reach it through `$0` to `$4`. This
+  // backend serves no console history, so nothing can ever dereference it.
+  // Ownership still transfers here, so release it rather than leak it.
+  v8_inspector__V8InspectorSession__Inspectable__DELETE(inspectable);
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn v8_inspector__V8InspectorSession__canDispatchMethod(
   method: StringView,
@@ -387,13 +568,55 @@ mod cdp {
     );
   }
 
+  /// An object handed out by `wrapObject`, protected until its group is
+  /// released. Dropping the session does not unprotect: it may outlive the
+  /// context, and the values go away with the isolate's VM regardless.
+  pub struct RemoteRef {
+    pub value: crate::jsc::jsc_sys::JSValueRef,
+    pub context: *const crate::Context,
+    pub ctx: crate::jsc::jsc_sys::JSContextRef,
+    pub group: Vec<u16>,
+  }
+
   pub struct CdpSession {
     channel: *mut RawChannel,
+    remote_objects: std::collections::HashMap<String, RemoteRef>,
+    next_object_id: u64,
   }
 
   impl CdpSession {
     pub fn new(channel: *mut RawChannel) -> Self {
-      CdpSession { channel }
+      CdpSession {
+        channel,
+        remote_objects: std::collections::HashMap::new(),
+        next_object_id: 1,
+      }
+    }
+
+    /// Registers `r` and returns its `objectId`. The format follows V8's
+    /// `<injected script>.<context>.<ordinal>`.
+    pub fn add_remote_object(&mut self, r: RemoteRef) -> String {
+      let id = format!("1.1.{}", self.next_object_id);
+      self.next_object_id += 1;
+      self.remote_objects.insert(id.clone(), r);
+      id
+    }
+
+    pub fn remote_object(&self, id: &str) -> Option<&RemoteRef> {
+      self.remote_objects.get(id)
+    }
+
+    pub fn release_group(&mut self, group: &[u16]) -> Vec<RemoteRef> {
+      let ids: Vec<String> = self
+        .remote_objects
+        .iter()
+        .filter(|(_, r)| r.group == group)
+        .map(|(id, _)| id.clone())
+        .collect();
+      ids
+        .iter()
+        .filter_map(|id| self.remote_objects.remove(id))
+        .collect()
     }
   }
 

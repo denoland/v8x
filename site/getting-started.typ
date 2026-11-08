@@ -15,7 +15,7 @@ Replace the `v8` dependency with `v8x` and pick an engine feature:
 
 ```toml
 [dependencies]
-v8 = { package = "v8x", version = "149.4.0", features = ["quickjs"] }
+v8 = { package = "v8x", version = "158.0.0", features = ["quickjs"] }
 ```
 
 Engine features are mutually exclusive; enable exactly one:
@@ -39,7 +39,7 @@ the swap:
 ```toml
 # deno's workspace Cargo.toml
 [patch.crates-io]
-v8 = { package = "v8x", version = "149.4.0", features = ["jsc"] }
+v8 = { package = "v8x", version = "158.0.0", features = ["jsc"] }
 ```
 
 ```sh

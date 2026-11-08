@@ -11,6 +11,7 @@ pub(crate) mod inspector;
 pub(crate) mod introspect;
 pub(crate) mod isolate;
 pub(crate) mod jsc_sys;
+pub(crate) mod locker;
 pub(crate) mod misc;
 pub(crate) mod module;
 pub(crate) mod object;

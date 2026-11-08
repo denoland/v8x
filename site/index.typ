@@ -14,8 +14,8 @@
 JavaScript engine:
 
 ```diff
--v8 = "149.4.0"
-+v8 = { package = "v8x", version = "149.4.0", features = ["jsc"] }
+-v8 = "158.0.0"
++v8 = { package = "v8x", version = "158.0.0", features = ["jsc"] }
 ```
 
 Anything built on rusty_v8, including `deno_core` and Deno itself, compiles
@@ -36,7 +36,7 @@ One engine is active at a time. The usual reason to swap is binary size:
 #table(
   columns: 3,
   [*engine*], [*deno binary*], [*engine size*],
-  [V8 14.9], [78.7 MB], [\~40 MB static],
+  [V8 15.2], [78.7 MB], [\~40 MB static],
   [JSC (vendored)], [80.7 MB], [\~48 MB static],
   [system JSC], [54.2 MB], [0, ships with the OS],
   [quickjs-ng], [56.1 MB], [\~1 MB static],

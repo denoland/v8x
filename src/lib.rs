@@ -67,8 +67,12 @@ mod handle;
 pub mod icu;
 #[path = "../vendor/rusty_v8/src/isolate.rs"]
 mod isolate;
+#[path = "../vendor/rusty_v8/src/isolate_group.rs"]
+mod isolate_group;
 #[path = "../vendor/rusty_v8/src/isolate_create_params.rs"]
 mod isolate_create_params;
+#[path = "../vendor/rusty_v8/src/locker.rs"]
+mod locker;
 #[path = "../vendor/rusty_v8/src/microtask.rs"]
 mod microtask;
 #[path = "../vendor/rusty_v8/src/module.rs"]
@@ -155,7 +159,10 @@ pub mod inspector;
 pub mod json;
 #[path = "../vendor/rusty_v8/src/script_compiler.rs"]
 pub mod script_compiler;
-#[cfg(feature = "simdutf")]
+// Unconditional since rusty_v8 v152.0.0 dropped the `simdutf` feature split
+// (denoland/rusty_v8#2048): `string.rs` now calls `crate::simdutf` on every
+// path. The `simdutf` Cargo feature is kept as an accepted no-op so existing
+// dependency declarations keep resolving.
 #[path = "../vendor/rusty_v8/src/simdutf.rs"]
 pub mod simdutf;
 
@@ -177,6 +184,7 @@ pub use handle::Local;
 pub use handle::SealedLocal;
 pub use handle::TracedReference;
 pub use handle::Weak;
+pub use isolate::ContextDependants;
 pub use isolate::GarbageCollectionType;
 pub use isolate::HeapCodeStatistics;
 pub use isolate::HeapSpaceStatistics;
@@ -185,12 +193,16 @@ pub use isolate::HostCreateShadowRealmContextCallback;
 pub use isolate::HostImportModuleDynamicallyCallback;
 pub use isolate::HostImportModuleWithPhaseDynamicallyCallback;
 pub use isolate::HostInitializeImportMetaObjectCallback;
+pub use isolate::IntoSharedError;
+pub use isolate::IntoSharedErrorKind;
 pub use isolate::Isolate;
 pub use isolate::IsolateHandle;
 pub use isolate::MemoryPressureLevel;
 pub use isolate::MessageCallback;
 pub use isolate::MessageErrorLevel;
 pub use isolate::MicrotasksPolicy;
+pub use isolate::ModifyCodeGenerationFromStringsCallback;
+pub use isolate::ModifyCodeGenerationFromStringsResult;
 pub use isolate::ModuleImportPhase;
 pub use isolate::NearHeapLimitCallback;
 pub use isolate::OomDetails;
@@ -204,8 +216,12 @@ pub use isolate::TimeZoneDetection;
 pub use isolate::UseCounterCallback;
 pub use isolate::UseCounterFeature;
 pub use isolate::WasmAsyncSuccess;
+pub use isolate_group::IsolateGroup;
 pub use isolate_create_params::CreateParams;
+pub use locker::Locker;
+pub use locker::SharedIsolate;
 pub use microtask::MicrotaskQueue;
+pub use microtask::MicrotaskQueueHandle;
 pub use module::*;
 pub use object::*;
 pub use platform::IdleTask;
@@ -224,6 +240,7 @@ pub use property_filter::*;
 pub use property_handler_flags::*;
 pub use regexp::RegExpCreationFlags;
 pub use scope::AllowJavascriptExecutionScope;
+pub use scope::allow_scopes_of_another_isolate;
 
 pub use scope::CallbackScope;
 pub use scope::ContextScope;

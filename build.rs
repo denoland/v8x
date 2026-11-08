@@ -85,7 +85,7 @@ fn main() {
   // bindings for this target. The C ABI symbols are *defined* by our own
   // engine shim (linked below); only the declarations come from here.
   //
-  // The files in gen/ are unmodified upstream rusty_v8 v149.4.0 release
+  // The files in gen/ are unmodified upstream rusty_v8 v158.0.0 release
   // assets. Their content varies only by OS family — the per-arch and
   // debug/release/simdutf variants upstream publishes are byte-identical
   // within one OS (verified; see gen/README.md) — so one file per OS family

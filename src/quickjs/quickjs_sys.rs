@@ -316,6 +316,9 @@ unsafe extern "C" {
     opaque: *mut c_void,
   );
   pub fn JS_SetMaxStackSize(rt: *mut JSRuntime, stack_size: usize);
+  /// Re-reads the current thread's stack bounds into the runtime. Needed when
+  /// a runtime moves between threads under `v8::Locker` (see `locker.rs`).
+  pub fn JS_UpdateStackTop(rt: *mut JSRuntime);
   pub fn JS_SetCanBlock(rt: *mut JSRuntime, can_block: bool);
   pub fn JS_ComputeMemoryUsage(rt: *mut JSRuntime, usage: *mut JSMemoryUsage);
   pub fn JS_SetSharedArrayBufferFunctions(

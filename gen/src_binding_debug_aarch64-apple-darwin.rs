@@ -792,7 +792,13 @@ pub enum v8_Isolate_UseCounterFeature {
   kOBSOLETE_WasmResizableBuffers = 183,
   kInvalidatedArrayBufferMutableProtector = 184,
   kHoleyArrayReadthrough = 185,
-  kUseCounterFeatureCount = 186,
+  kWasmGCAllocation = 186,
+  kModuleNamespaceMissingDefaultWithStarExport = 187,
+  kRegExpMatcherFlagsMismatch = 188,
+  kRegExpCustomSpecies = 189,
+  kWasmWideArithmetic = 190,
+  kBigInt = 191,
+  kUseCounterFeatureCount = 192,
 }
 #[repr(u32)]
 #[doc = " Interceptor callbacks use this value to indicate whether the request was\n intercepted or not.\n\n The values for constants and type are chosen this way for better\n performance."]
@@ -862,6 +868,9 @@ pub const v8__TracedReference_SIZE: usize = 8;
 pub const v8__Eternal_SIZE: usize = 8;
 pub const v8__String__ValueView_SIZE: usize = 32;
 pub const v8__String__kMaxLength: ::std::os::raw::c_int = 536870888;
+pub const v8__String__WriteFlags__kNullTerminate: ::std::os::raw::c_int = 1;
+pub const v8__String__WriteFlags__kReplaceInvalidUtf8: ::std::os::raw::c_int =
+  2;
 pub const v8__TypedArray__kMaxByteLength: usize = 9007199254740991;
 pub const v8__TYPED_ARRAY_MAX_SIZE_IN_HEAP: usize = 0;
 pub const v8__Uint8Array__kMaxLength: usize = 9007199254740991;
@@ -894,11 +903,11 @@ pub use self::v8_GCCallbackFlags as v8__GCCallbackFlags;
 pub use self::v8_GCType as v8__GCType;
 #[doc = " Interceptor callbacks use this value to indicate whether the request was\n intercepted or not.\n\n The values for constants and type are chosen this way for better\n performance."]
 pub use self::v8_Intercepted as v8__Intercepted;
-pub const v8__MAJOR_VERSION: u32 = 14;
-pub const v8__MINOR_VERSION: u32 = 9;
-pub const v8__BUILD_NUMBER: u32 = 207;
-pub const v8__PATCH_LEVEL: u32 = 2;
-pub const v8__VERSION_STRING: &::std::ffi::CStr = c"14.9.207.2-rusty";
+pub const v8__MAJOR_VERSION: u32 = 15;
+pub const v8__MINOR_VERSION: u32 = 8;
+pub const v8__BUILD_NUMBER: u32 = 62;
+pub const v8__PATCH_LEVEL: u32 = 23;
+pub const v8__VERSION_STRING: &::std::ffi::CStr = c"15.8.62.23-rusty";
 #[repr(C)]
 #[derive(Debug)]
 pub struct ExternalConstOneByteStringResource {

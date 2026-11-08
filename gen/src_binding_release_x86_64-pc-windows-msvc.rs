@@ -10,18 +10,6 @@ pub type cppgc_GarbageCollected_IsGarbageCollectedTypeMarker =
   ::std::os::raw::c_void;
 pub type cppgc_GarbageCollected_ParentMostGarbageCollectedType<T> = T;
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct cppgc_Visitor_Key {
-  pub _address: u8,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-  ["Size of cppgc_Visitor_Key"]
-    [::std::mem::size_of::<cppgc_Visitor_Key>() - 1usize];
-  ["Alignment of cppgc_Visitor_Key"]
-    [::std::mem::align_of::<cppgc_Visitor_Key>() - 1usize];
-};
-#[repr(C)]
 pub struct cppgc_NameProvider__bindgen_vtable(::std::os::raw::c_void);
 #[doc = " NameProvider allows for providing a human-readable name for garbage-collected\n objects.\n\n There's two cases of names to distinguish:\n a. Explicitly specified names via using NameProvider. Such names are always\n    preserved in the system.\n b. Internal names that Oilpan infers from a C++ type on the class hierarchy\n    of the object. This is not necessarily the type of the actually\n    instantiated object.\n\n Depending on the build configuration, Oilpan may hide names, i.e., represent\n them with kHiddenName, of case b. to avoid exposing internal details."]
 #[repr(C)]
@@ -39,112 +27,6 @@ const _: () = {
     [::std::mem::size_of::<cppgc_NameProvider>() - 8usize];
   ["Alignment of cppgc_NameProvider"]
     [::std::mem::align_of::<cppgc_NameProvider>() - 8usize];
-};
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct v8_String_WriteFlags {
-  pub _address: u8,
-}
-pub const v8_String_WriteFlags_kNone: v8_String_WriteFlags__bindgen_ty_1 = 0;
-pub const v8_String_WriteFlags_kNullTerminate:
-  v8_String_WriteFlags__bindgen_ty_1 = 1;
-pub const v8_String_WriteFlags_kReplaceInvalidUtf8:
-  v8_String_WriteFlags__bindgen_ty_1 = 2;
-pub type v8_String_WriteFlags__bindgen_ty_1 = ::std::os::raw::c_int;
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-  ["Size of v8_String_WriteFlags"]
-    [::std::mem::size_of::<v8_String_WriteFlags>() - 1usize];
-  ["Alignment of v8_String_WriteFlags"]
-    [::std::mem::align_of::<v8_String_WriteFlags>() - 1usize];
-};
-#[repr(C)]
-pub struct v8_String_ExternalStringResourceBase__bindgen_vtable(
-  ::std::os::raw::c_void,
-);
-#[repr(C)]
-#[derive(Debug)]
-pub struct v8_String_ExternalStringResourceBase {
-  pub vtable_: *const v8_String_ExternalStringResourceBase__bindgen_vtable,
-}
-#[repr(C)]
-pub struct v8_String_ExternalStringResourceBase_SharedMemoryUsageRecorder__bindgen_vtable(
-  ::std::os::raw::c_void,
-);
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct v8_String_ExternalStringResourceBase_SharedMemoryUsageRecorder { pub vtable_ : * const v8_String_ExternalStringResourceBase_SharedMemoryUsageRecorder__bindgen_vtable , }
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-  ["Size of v8_String_ExternalStringResourceBase_SharedMemoryUsageRecorder"]
-    [::std::mem::size_of::<
-      v8_String_ExternalStringResourceBase_SharedMemoryUsageRecorder,
-    >()
-      - 8usize];
-  [
-    "Alignment of v8_String_ExternalStringResourceBase_SharedMemoryUsageRecorder",
-  ][::std::mem::align_of::<
-    v8_String_ExternalStringResourceBase_SharedMemoryUsageRecorder,
-  >()
-    - 8usize];
-};
-unsafe extern "C" {
-  #[link_name = "\u{1}?kDefaultMemoryEstimate@ExternalStringResourceBase@String@v8@@2_KB"]
-  pub static v8_String_ExternalStringResourceBase_kDefaultMemoryEstimate: usize;
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-  ["Size of v8_String_ExternalStringResourceBase"]
-    [::std::mem::size_of::<v8_String_ExternalStringResourceBase>() - 8usize];
-  ["Alignment of v8_String_ExternalStringResourceBase"]
-    [::std::mem::align_of::<v8_String_ExternalStringResourceBase>() - 8usize];
-};
-#[doc = " An ExternalOneByteStringResource is a wrapper around an one-byte\n string buffer that resides outside V8's heap. Implement an\n ExternalOneByteStringResource to manage the life cycle of the\n underlying buffer.  Note that the string data must be immutable\n and that the data must be Latin-1 and not UTF-8, which would require\n special treatment internally in the engine and do not allow efficient\n indexing.  Use String::New or convert to 16 bit data for non-Latin1."]
-#[repr(C)]
-#[derive(Debug)]
-pub struct v8_String_ExternalOneByteStringResource {
-  pub _base: v8_String_ExternalStringResourceBase,
-  pub cached_data_: *const ::std::os::raw::c_char,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-  ["Size of v8_String_ExternalOneByteStringResource"][::std::mem::size_of::<
-    v8_String_ExternalOneByteStringResource,
-  >()
-    - 16usize];
-  ["Alignment of v8_String_ExternalOneByteStringResource"][::std::mem::align_of::<
-    v8_String_ExternalOneByteStringResource,
-  >() - 8usize];
-  ["Offset of field: v8_String_ExternalOneByteStringResource::cached_data_"][::std::mem::offset_of!(
-    v8_String_ExternalOneByteStringResource,
-    cached_data_
-  )
-    - 8usize];
-};
-unsafe extern "C" {
-  #[doc = " Update {cached_data_} with the data from the underlying buffer. This can\n be called only for cacheable resources."]
-  #[link_name = "\u{1}?UpdateDataCache@ExternalOneByteStringResource@String@v8@@QEAAXXZ"]
-  pub fn v8_String_ExternalOneByteStringResource_UpdateDataCache(
-    this: *mut v8_String_ExternalOneByteStringResource,
-  );
-}
-impl v8_String_ExternalOneByteStringResource {
-  #[inline]
-  pub unsafe fn UpdateDataCache(&mut self) {
-    v8_String_ExternalOneByteStringResource_UpdateDataCache(self)
-  }
-}
-#[repr(C)]
-#[derive(Debug)]
-pub struct v8_Object_Wrappable {
-  pub _base_1: cppgc_NameProvider,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-  ["Size of v8_Object_Wrappable"]
-    [::std::mem::size_of::<v8_Object_Wrappable>() - 8usize];
-  ["Alignment of v8_Object_Wrappable"]
-    [::std::mem::align_of::<v8_Object_Wrappable>() - 8usize];
 };
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -602,10 +484,220 @@ impl v8_HeapCodeStatistics {
     __bindgen_tmp.assume_init()
   }
 }
+#[repr(u32)]
+#[doc = " Interceptor callbacks use this value to indicate whether the request was\n intercepted or not.\n\n The values for constants and type are chosen this way for better\n performance."]
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+pub enum v8_Intercepted {
+  kNo = 1,
+  kYes = 0,
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct memory_span_t {
+  pub data: *mut u8,
+  pub size: usize,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+  ["Size of memory_span_t"][::std::mem::size_of::<memory_span_t>() - 16usize];
+  ["Alignment of memory_span_t"]
+    [::std::mem::align_of::<memory_span_t>() - 8usize];
+  ["Offset of field: memory_span_t::data"]
+    [::std::mem::offset_of!(memory_span_t, data) - 0usize];
+  ["Offset of field: memory_span_t::size"]
+    [::std::mem::offset_of!(memory_span_t, size) - 8usize];
+};
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct const_memory_span_t {
+  pub data: *const u8,
+  pub size: usize,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+  ["Size of const_memory_span_t"]
+    [::std::mem::size_of::<const_memory_span_t>() - 16usize];
+  ["Alignment of const_memory_span_t"]
+    [::std::mem::align_of::<const_memory_span_t>() - 8usize];
+  ["Offset of field: const_memory_span_t::data"]
+    [::std::mem::offset_of!(const_memory_span_t, data) - 0usize];
+  ["Offset of field: const_memory_span_t::size"]
+    [::std::mem::offset_of!(const_memory_span_t, size) - 8usize];
+};
+#[repr(C)]
+#[derive(Debug)]
+pub struct RustObj {
+  pub _base: Wrappable,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+  ["Size of RustObj"][::std::mem::size_of::<RustObj>() - 8usize];
+  ["Alignment of RustObj"][::std::mem::align_of::<RustObj>() - 8usize];
+};
+unsafe extern "C" {
+  #[link_name = "\u{1}??1RustObj@@UEAA@XZ"]
+  pub fn RustObj_RustObj_destructor(this: *mut RustObj);
+}
+unsafe extern "C" {
+  #[link_name = "\u{1}?GetHumanReadableName@RustObj@@UEBAPEBDXZ"]
+  pub fn RustObj_GetHumanReadableName(
+    this: *mut ::std::os::raw::c_void,
+  ) -> *const ::std::os::raw::c_char;
+}
+#[doc = " Types defined here will be compiled with bindgen\n and made available in `crate::binding` in rust."]
+pub const v8__ScriptOrigin_SIZE: usize = 40;
+pub const cppgc__Member_SIZE: usize = 4;
+pub const cppgc__WeakMember_SIZE: usize = 4;
+pub const v8__TracedReference_SIZE: usize = 8;
+pub const v8__Eternal_SIZE: usize = 8;
+pub const v8__String__ValueView_SIZE: usize = 32;
+pub const v8__String__kMaxLength: ::std::os::raw::c_int = 536870888;
+pub const v8__String__WriteFlags__kNullTerminate: ::std::os::raw::c_int = 1;
+pub const v8__String__WriteFlags__kReplaceInvalidUtf8: ::std::os::raw::c_int =
+  2;
+pub const v8__TypedArray__kMaxByteLength: usize = 9007199254740991;
+pub const v8__TYPED_ARRAY_MAX_SIZE_IN_HEAP: usize = 0;
+pub const v8__Uint8Array__kMaxLength: usize = 9007199254740991;
+pub const v8__Uint8ClampedArray__kMaxLength: usize = 9007199254740991;
+pub const v8__Int8Array__kMaxLength: usize = 9007199254740991;
+pub const v8__Uint16Array__kMaxLength: usize = 4503599627370495;
+pub const v8__Int16Array__kMaxLength: usize = 4503599627370495;
+pub const v8__Uint32Array__kMaxLength: usize = 2251799813685247;
+pub const v8__Int32Array__kMaxLength: usize = 2251799813685247;
+pub const v8__Float16Array__kMaxLength: usize = 4503599627370495;
+pub const v8__Float32Array__kMaxLength: usize = 2251799813685247;
+pub const v8__Float64Array__kMaxLength: usize = 1125899906842623;
+pub const v8__BigUint64Array__kMaxLength: usize = 1125899906842623;
+pub const v8__BigInt64Array__kMaxLength: usize = 1125899906842623;
+pub type v8__CFunction = v8_CFunction;
+pub type v8__CFunctionInfo = v8_CFunctionInfo;
+pub type v8__FastOneByteString = v8_FastOneByteString;
+#[doc = " Features reported via the SetUseCounterCallback callback. Do not change\n assigned numbers of existing items; add new features to the end of this\n list.\n Dead features can be marked `V8_DEPRECATE_SOON`, then `V8_DEPRECATED`, and\n then finally be renamed to `kOBSOLETE_...` to stop embedders from using\n them."]
+pub use self::UseCounterFeature as v8__Isolate__UseCounterFeature;
+pub type v8__String__WriteFlags = WriteFlags;
+#[doc = " Import phases in import requests."]
+pub use self::v8_ModuleImportPhase as v8__ModuleImportPhase;
+#[doc = " Collection of V8 heap information.\n\n Instances of this class can be passed to v8::Isolate::GetHeapStatistics to\n get heap statistics from V8."]
+pub type v8__HeapStatistics = v8_HeapStatistics;
+pub type v8__HeapSpaceStatistics = v8_HeapSpaceStatistics;
+pub type v8__HeapCodeStatistics = v8_HeapCodeStatistics;
+#[doc = " GCCallbackFlags is used to notify additional information about the GC\n callback.\n   - kGCCallbackFlagConstructRetainedObjectInfos: The GC callback is for\n     constructing retained object infos.\n   - kGCCallbackFlagForced: The GC callback is for a forced GC for testing.\n   - kGCCallbackFlagSynchronousPhantomCallbackProcessing: The GC callback\n     is called synchronously without getting posted to an idle task.\n   - kGCCallbackFlagCollectAllAvailableGarbage: The GC callback is called\n     in a phase where V8 is trying to collect all available garbage\n     (e.g., handling a low memory notification).\n   - kGCCallbackScheduleIdleGarbageCollection: The GC callback is called to\n     trigger an idle garbage collection."]
+pub use self::v8_GCCallbackFlags as v8__GCCallbackFlags;
+#[doc = " Applications can register callback functions which will be called before and\n after certain garbage collection operations.  Allocations are not allowed in\n the callback functions, you therefore cannot manipulate objects (set or\n delete properties for example) since it is possible such operations will\n result in the allocation of objects.\n TODO(v8:12612): Deprecate kGCTypeMinorMarkSweep after updating blink."]
+pub use self::v8_GCType as v8__GCType;
+#[doc = " Interceptor callbacks use this value to indicate whether the request was\n intercepted or not.\n\n The values for constants and type are chosen this way for better\n performance."]
+pub use self::v8_Intercepted as v8__Intercepted;
+pub const v8__MAJOR_VERSION: u32 = 15;
+pub const v8__MINOR_VERSION: u32 = 8;
+pub const v8__BUILD_NUMBER: u32 = 62;
+pub const v8__PATCH_LEVEL: u32 = 23;
+pub const v8__VERSION_STRING: &::std::ffi::CStr = c"15.8.62.23-rusty";
+#[repr(C)]
+#[derive(Debug)]
+pub struct ExternalConstOneByteStringResource {
+  pub _base: ExternalOneByteStringResource,
+  pub _length: ::std::os::raw::c_int,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+  ["Size of ExternalConstOneByteStringResource"]
+    [::std::mem::size_of::<ExternalConstOneByteStringResource>() - 24usize];
+  ["Alignment of ExternalConstOneByteStringResource"]
+    [::std::mem::align_of::<ExternalConstOneByteStringResource>() - 8usize];
+  ["Offset of field: ExternalConstOneByteStringResource::_length"][::std::mem::offset_of!(
+    ExternalConstOneByteStringResource,
+    _length
+  ) - 16usize];
+};
+#[repr(C)]
+#[derive(Debug)]
+pub struct Wrappable {
+  pub _base_1: cppgc_NameProvider,
+  _unused: [u8; 0],
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+  [
+    "Size of template specialization: cppgc_GarbageCollected_open0_Wrappable_close0",
+  ][::std::mem::size_of::<cppgc_GarbageCollected>() - 1usize];
+  [
+    "Align of template specialization: cppgc_GarbageCollected_open0_Wrappable_close0",
+  ][::std::mem::align_of::<cppgc_GarbageCollected>() - 1usize];
+};
+#[doc = " An ExternalOneByteStringResource is a wrapper around an one-byte\n string buffer that resides outside V8's heap. Implement an\n ExternalOneByteStringResource to manage the life cycle of the\n underlying buffer.  Note that the string data must be immutable\n and that the data must be Latin-1 and not UTF-8, which would require\n special treatment internally in the engine and do not allow efficient\n indexing.  Use String::New or convert to 16 bit data for non-Latin1."]
+#[repr(C)]
+#[derive(Debug)]
+pub struct ExternalOneByteStringResource {
+  pub _base: ExternalStringResourceBase,
+  pub cached_data_: *const ::std::os::raw::c_char,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+  ["Size of ExternalOneByteStringResource"]
+    [::std::mem::size_of::<ExternalOneByteStringResource>() - 16usize];
+  ["Alignment of ExternalOneByteStringResource"]
+    [::std::mem::align_of::<ExternalOneByteStringResource>() - 8usize];
+  ["Offset of field: ExternalOneByteStringResource::cached_data_"][::std::mem::offset_of!(
+    ExternalOneByteStringResource,
+    cached_data_
+  ) - 8usize];
+};
+unsafe extern "C" {
+  #[doc = " Update {cached_data_} with the data from the underlying buffer. This can\n be called only for cacheable resources."]
+  #[link_name = "\u{1}?UpdateDataCache@ExternalOneByteStringResource@String@v8@@QEAAXXZ"]
+  pub fn ExternalOneByteStringResource_UpdateDataCache(
+    this: *const ExternalOneByteStringResource,
+  );
+}
+impl ExternalOneByteStringResource {
+  #[inline]
+  pub unsafe fn UpdateDataCache(&mut self) {
+    ExternalOneByteStringResource_UpdateDataCache(self)
+  }
+}
+#[repr(C)]
+pub struct ExternalStringResourceBase__bindgen_vtable(::std::os::raw::c_void);
+#[repr(C)]
+#[derive(Debug)]
+pub struct ExternalStringResourceBase {
+  pub vtable_: *const ExternalStringResourceBase__bindgen_vtable,
+}
+#[repr(C)]
+pub struct ExternalStringResourceBase_SharedMemoryUsageRecorder__bindgen_vtable(
+  ::std::os::raw::c_void,
+);
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct ExternalStringResourceBase_SharedMemoryUsageRecorder {
+  pub vtable_:
+    *const ExternalStringResourceBase_SharedMemoryUsageRecorder__bindgen_vtable,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+  ["Size of ExternalStringResourceBase_SharedMemoryUsageRecorder"]
+    [::std::mem::size_of::<ExternalStringResourceBase_SharedMemoryUsageRecorder>(
+    ) - 8usize];
+  ["Alignment of ExternalStringResourceBase_SharedMemoryUsageRecorder"]
+    [::std::mem::align_of::<
+      ExternalStringResourceBase_SharedMemoryUsageRecorder,
+    >()
+      - 8usize];
+};
+unsafe extern "C" {
+  #[link_name = "\u{1}?kDefaultMemoryEstimate@ExternalStringResourceBase@String@v8@@2_KB"]
+  pub static ExternalStringResourceBase_kDefaultMemoryEstimate: usize;
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+  ["Size of ExternalStringResourceBase"]
+    [::std::mem::size_of::<ExternalStringResourceBase>() - 8usize];
+  ["Alignment of ExternalStringResourceBase"]
+    [::std::mem::align_of::<ExternalStringResourceBase>() - 8usize];
+};
 #[repr(i32)]
 #[doc = " Features reported via the SetUseCounterCallback callback. Do not change\n assigned numbers of existing items; add new features to the end of this\n list.\n Dead features can be marked `V8_DEPRECATE_SOON`, then `V8_DEPRECATED`, and\n then finally be renamed to `kOBSOLETE_...` to stop embedders from using\n them."]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
-pub enum v8_Isolate_UseCounterFeature {
+pub enum UseCounterFeature {
   kUseAsm = 0,
   kBreakIterator = 1,
   kOBSOLETE_LegacyConst = 2,
@@ -792,136 +884,25 @@ pub enum v8_Isolate_UseCounterFeature {
   kOBSOLETE_WasmResizableBuffers = 183,
   kInvalidatedArrayBufferMutableProtector = 184,
   kHoleyArrayReadthrough = 185,
-  kUseCounterFeatureCount = 186,
-}
-#[repr(u32)]
-#[doc = " Interceptor callbacks use this value to indicate whether the request was\n intercepted or not.\n\n The values for constants and type are chosen this way for better\n performance."]
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
-pub enum v8_Intercepted {
-  kNo = 1,
-  kYes = 0,
+  kWasmGCAllocation = 186,
+  kModuleNamespaceMissingDefaultWithStarExport = 187,
+  kRegExpMatcherFlagsMismatch = 188,
+  kRegExpCustomSpecies = 189,
+  kWasmWideArithmetic = 190,
+  kBigInt = 191,
+  kUseCounterFeatureCount = 192,
 }
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct memory_span_t {
-  pub data: *mut u8,
-  pub size: usize,
+pub struct WriteFlags {
+  pub _address: u8,
 }
+pub const WriteFlags_kNone: WriteFlags__bindgen_ty_1 = 0;
+pub const WriteFlags_kNullTerminate: WriteFlags__bindgen_ty_1 = 1;
+pub const WriteFlags_kReplaceInvalidUtf8: WriteFlags__bindgen_ty_1 = 2;
+pub type WriteFlags__bindgen_ty_1 = ::std::os::raw::c_int;
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-  ["Size of memory_span_t"][::std::mem::size_of::<memory_span_t>() - 16usize];
-  ["Alignment of memory_span_t"]
-    [::std::mem::align_of::<memory_span_t>() - 8usize];
-  ["Offset of field: memory_span_t::data"]
-    [::std::mem::offset_of!(memory_span_t, data) - 0usize];
-  ["Offset of field: memory_span_t::size"]
-    [::std::mem::offset_of!(memory_span_t, size) - 8usize];
-};
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct const_memory_span_t {
-  pub data: *const u8,
-  pub size: usize,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-  ["Size of const_memory_span_t"]
-    [::std::mem::size_of::<const_memory_span_t>() - 16usize];
-  ["Alignment of const_memory_span_t"]
-    [::std::mem::align_of::<const_memory_span_t>() - 8usize];
-  ["Offset of field: const_memory_span_t::data"]
-    [::std::mem::offset_of!(const_memory_span_t, data) - 0usize];
-  ["Offset of field: const_memory_span_t::size"]
-    [::std::mem::offset_of!(const_memory_span_t, size) - 8usize];
-};
-#[repr(C)]
-#[derive(Debug)]
-pub struct RustObj {
-  pub _base: v8_Object_Wrappable,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-  ["Size of RustObj"][::std::mem::size_of::<RustObj>() - 8usize];
-  ["Alignment of RustObj"][::std::mem::align_of::<RustObj>() - 8usize];
-};
-unsafe extern "C" {
-  #[link_name = "\u{1}??1RustObj@@UEAA@XZ"]
-  pub fn RustObj_RustObj_destructor(this: *mut RustObj);
-}
-unsafe extern "C" {
-  #[link_name = "\u{1}?GetHumanReadableName@RustObj@@UEBAPEBDXZ"]
-  pub fn RustObj_GetHumanReadableName(
-    this: *mut ::std::os::raw::c_void,
-  ) -> *const ::std::os::raw::c_char;
-}
-#[doc = " Types defined here will be compiled with bindgen\n and made available in `crate::binding` in rust."]
-pub const v8__ScriptOrigin_SIZE: usize = 40;
-pub const cppgc__Member_SIZE: usize = 4;
-pub const cppgc__WeakMember_SIZE: usize = 4;
-pub const v8__TracedReference_SIZE: usize = 8;
-pub const v8__Eternal_SIZE: usize = 8;
-pub const v8__String__ValueView_SIZE: usize = 32;
-pub const v8__String__kMaxLength: ::std::os::raw::c_int = 536870888;
-pub const v8__TypedArray__kMaxByteLength: usize = 9007199254740991;
-pub const v8__TYPED_ARRAY_MAX_SIZE_IN_HEAP: usize = 0;
-pub const v8__Uint8Array__kMaxLength: usize = 9007199254740991;
-pub const v8__Uint8ClampedArray__kMaxLength: usize = 9007199254740991;
-pub const v8__Int8Array__kMaxLength: usize = 9007199254740991;
-pub const v8__Uint16Array__kMaxLength: usize = 4503599627370495;
-pub const v8__Int16Array__kMaxLength: usize = 4503599627370495;
-pub const v8__Uint32Array__kMaxLength: usize = 2251799813685247;
-pub const v8__Int32Array__kMaxLength: usize = 2251799813685247;
-pub const v8__Float16Array__kMaxLength: usize = 4503599627370495;
-pub const v8__Float32Array__kMaxLength: usize = 2251799813685247;
-pub const v8__Float64Array__kMaxLength: usize = 1125899906842623;
-pub const v8__BigUint64Array__kMaxLength: usize = 1125899906842623;
-pub const v8__BigInt64Array__kMaxLength: usize = 1125899906842623;
-pub type v8__CFunction = v8_CFunction;
-pub type v8__CFunctionInfo = v8_CFunctionInfo;
-pub type v8__FastOneByteString = v8_FastOneByteString;
-#[doc = " Features reported via the SetUseCounterCallback callback. Do not change\n assigned numbers of existing items; add new features to the end of this\n list.\n Dead features can be marked `V8_DEPRECATE_SOON`, then `V8_DEPRECATED`, and\n then finally be renamed to `kOBSOLETE_...` to stop embedders from using\n them."]
-pub use self::v8_Isolate_UseCounterFeature as v8__Isolate__UseCounterFeature;
-pub type v8__String__WriteFlags = v8_String_WriteFlags;
-#[doc = " Import phases in import requests."]
-pub use self::v8_ModuleImportPhase as v8__ModuleImportPhase;
-#[doc = " Collection of V8 heap information.\n\n Instances of this class can be passed to v8::Isolate::GetHeapStatistics to\n get heap statistics from V8."]
-pub type v8__HeapStatistics = v8_HeapStatistics;
-pub type v8__HeapSpaceStatistics = v8_HeapSpaceStatistics;
-pub type v8__HeapCodeStatistics = v8_HeapCodeStatistics;
-#[doc = " GCCallbackFlags is used to notify additional information about the GC\n callback.\n   - kGCCallbackFlagConstructRetainedObjectInfos: The GC callback is for\n     constructing retained object infos.\n   - kGCCallbackFlagForced: The GC callback is for a forced GC for testing.\n   - kGCCallbackFlagSynchronousPhantomCallbackProcessing: The GC callback\n     is called synchronously without getting posted to an idle task.\n   - kGCCallbackFlagCollectAllAvailableGarbage: The GC callback is called\n     in a phase where V8 is trying to collect all available garbage\n     (e.g., handling a low memory notification).\n   - kGCCallbackScheduleIdleGarbageCollection: The GC callback is called to\n     trigger an idle garbage collection."]
-pub use self::v8_GCCallbackFlags as v8__GCCallbackFlags;
-#[doc = " Applications can register callback functions which will be called before and\n after certain garbage collection operations.  Allocations are not allowed in\n the callback functions, you therefore cannot manipulate objects (set or\n delete properties for example) since it is possible such operations will\n result in the allocation of objects.\n TODO(v8:12612): Deprecate kGCTypeMinorMarkSweep after updating blink."]
-pub use self::v8_GCType as v8__GCType;
-#[doc = " Interceptor callbacks use this value to indicate whether the request was\n intercepted or not.\n\n The values for constants and type are chosen this way for better\n performance."]
-pub use self::v8_Intercepted as v8__Intercepted;
-pub const v8__MAJOR_VERSION: u32 = 14;
-pub const v8__MINOR_VERSION: u32 = 9;
-pub const v8__BUILD_NUMBER: u32 = 207;
-pub const v8__PATCH_LEVEL: u32 = 2;
-pub const v8__VERSION_STRING: &::std::ffi::CStr = c"14.9.207.2-rusty";
-#[repr(C)]
-#[derive(Debug)]
-pub struct ExternalConstOneByteStringResource {
-  pub _base: v8_String_ExternalOneByteStringResource,
-  pub _length: ::std::os::raw::c_int,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-  ["Size of ExternalConstOneByteStringResource"]
-    [::std::mem::size_of::<ExternalConstOneByteStringResource>() - 24usize];
-  ["Alignment of ExternalConstOneByteStringResource"]
-    [::std::mem::align_of::<ExternalConstOneByteStringResource>() - 8usize];
-  ["Offset of field: ExternalConstOneByteStringResource::_length"][::std::mem::offset_of!(
-    ExternalConstOneByteStringResource,
-    _length
-  ) - 16usize];
-};
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-  [
-    "Size of template specialization: cppgc_GarbageCollected_open0_v8_Object_Wrappable_close0",
-  ][::std::mem::size_of::<cppgc_GarbageCollected>() - 1usize];
-  [
-    "Align of template specialization: cppgc_GarbageCollected_open0_v8_Object_Wrappable_close0",
-  ][::std::mem::align_of::<cppgc_GarbageCollected>() - 1usize];
+  ["Size of WriteFlags"][::std::mem::size_of::<WriteFlags>() - 1usize];
+  ["Alignment of WriteFlags"][::std::mem::align_of::<WriteFlags>() - 1usize];
 };

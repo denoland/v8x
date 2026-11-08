@@ -410,6 +410,31 @@ pub(crate) struct Dispatchable {
   method: Vec<u8>,
   session_id: Vec<u8>,
   params: Vec<u8>,
+  /// The serialized message exactly as it arrived. The fallthrough callback
+  /// is handed it verbatim.
+  message: Vec<u8>,
+  /// Embedder blob carried alongside the message, handed back verbatim by
+  /// `associatedData` and to the fallthrough callback.
+  associated_data: Vec<u8>,
+  /// Owned `FallthroughCallbackData` from the Rust side, released with
+  /// `crdtp__FallthroughCallback__Drop`. Null when the embedder gave none.
+  fallthrough: *mut c_void,
+}
+
+unsafe extern "C" {
+  /// Both are defined by the vendored `crdtp.rs`, which owns the boxed Rust
+  /// closure this shim only stores and hands back.
+  fn crdtp__FallthroughCallback__Run(
+    callback: *mut c_void,
+    call_id: i32,
+    method_data: *const u8,
+    method_len: usize,
+    message_data: *const u8,
+    message_len: usize,
+    associated_data: *const u8,
+    associated_data_len: usize,
+  );
+  fn crdtp__FallthroughCallback__Drop(callback: *mut c_void);
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -433,27 +458,6 @@ pub(crate) struct UberDispatcher {
 pub(crate) struct DomainDispatcher {
   channel: *mut c_void,
   rust_dispatcher: *mut c_void,
-}
-
-enum Runnable {
-  /// No handler found: send a MethodNotFound error response (if it has an id).
-  NotFound {
-    channel: *mut c_void,
-    call_id: i32,
-    has_call_id: bool,
-    method: Vec<u8>,
-  },
-  /// Handler found: run the execute phase against the Rust dispatcher.
-  Execute {
-    rust_dispatcher: *mut c_void,
-    command: Vec<u8>,
-    dispatchable: *const c_void,
-  },
-}
-
-pub(crate) struct DispatchResult {
-  method_found: bool,
-  runnable: Option<Runnable>,
 }
 
 #[inline]
@@ -516,11 +520,25 @@ pub unsafe extern "C" fn crdtp__Serializable__AppendSerialized(
 pub unsafe extern "C" fn crdtp__Dispatchable__new(
   data: *const u8,
   len: usize,
+  associated_data: *const u8,
+  associated_data_len: usize,
+  fallthrough_callback: *mut c_void,
 ) -> *mut Dispatchable {
   let bytes = if data.is_null() || len == 0 {
     &[][..]
   } else {
     unsafe { std::slice::from_raw_parts(data, len) }
+  };
+
+  // Copied rather than borrowed: the C++ Dispatchable borrows the caller's
+  // buffers and rusty_v8 keeps them alive for it, but this shim outlives
+  // nothing in particular, so it owns what it reports.
+  let associated_data = if associated_data.is_null() || associated_data_len == 0
+  {
+    Vec::new()
+  } else {
+    unsafe { std::slice::from_raw_parts(associated_data, associated_data_len) }
+      .to_vec()
   };
 
   let mut d = Dispatchable {
@@ -530,6 +548,9 @@ pub unsafe extern "C" fn crdtp__Dispatchable__new(
     method: Vec::new(),
     session_id: Vec::new(),
     params: Vec::new(),
+    message: bytes.to_vec(),
+    associated_data,
+    fallthrough: fallthrough_callback,
   };
 
   if let Some(Json::Obj(members)) = parse_json(bytes) {
@@ -572,7 +593,37 @@ pub unsafe extern "C" fn crdtp__Dispatchable__new(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn crdtp__Dispatchable__DELETE(this: *mut Dispatchable) {
+  if this.is_null() {
+    return;
+  }
+  let fallthrough = unsafe { (*this).fallthrough };
+  if !fallthrough.is_null() {
+    unsafe { crdtp__FallthroughCallback__Drop(fallthrough) };
+  }
   unsafe { free_box(this) };
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn crdtp__Dispatchable__associatedDataLen(
+  this: *const Dispatchable,
+) -> usize {
+  if this.is_null() {
+    0
+  } else {
+    unsafe { &*this }.associated_data.len()
+  }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn crdtp__Dispatchable__associatedDataCopy(
+  this: *const Dispatchable,
+  out: *mut u8,
+) {
+  if this.is_null() || out.is_null() {
+    return;
+  }
+  let d = unsafe { &(*this).associated_data };
+  unsafe { std::ptr::copy_nonoverlapping(d.as_ptr(), out, d.len()) };
 }
 
 #[unsafe(no_mangle)]
@@ -1056,8 +1107,8 @@ fn split_method(method: &[u8]) -> (&[u8], &[u8]) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn crdtp__UberDispatcher__Dispatch(
   this: *mut UberDispatcher,
-  dispatchable: *const Dispatchable,
-) -> *mut DispatchResult {
+  dispatchable: *mut Dispatchable,
+) {
   let uber = unsafe { &mut *this };
   let d = unsafe { &*dispatchable };
 
@@ -1070,106 +1121,62 @@ pub unsafe extern "C" fn crdtp__UberDispatcher__Dispatch(
     .find(|(dom, _)| dom.as_slice() == domain)
     .map(|(_, p)| *p);
 
-  let not_found = || DispatchResult {
-    method_found: false,
-    runnable: Some(Runnable::NotFound {
-      channel: uber.channel,
-      call_id: d.call_id,
-      has_call_id: d.has_call_id,
-      method: d.method.clone(),
-    }),
-  };
-
-  let result = match dd_ptr {
-    None => not_found(),
-    Some(dd) => {
-      let rust_dispatcher = unsafe { (*dd).rust_dispatcher };
-      // Probe phase: null dispatchable, ask whether the command is handled.
-      let found = unsafe {
-        crdtp__DomainDispatcher__BASE__Dispatch(
-          rust_dispatcher,
-          command.as_ptr(),
-          command.len(),
-          std::ptr::null(),
-        )
-      };
-      if found {
-        DispatchResult {
-          method_found: true,
-          runnable: Some(Runnable::Execute {
-            rust_dispatcher,
-            command: command.to_vec(),
-            dispatchable: dispatchable as *const c_void,
-          }),
-        }
-      } else {
-        not_found()
-      }
-    }
-  };
-
-  box_raw(result)
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn crdtp__DispatchResult__DELETE(
-  this: *mut DispatchResult,
-) {
-  unsafe { free_box(this) };
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn crdtp__DispatchResult__MethodFound(
-  this: *const DispatchResult,
-) -> bool {
-  !this.is_null() && unsafe { (*this).method_found }
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn crdtp__DispatchResult__Run(this: *mut DispatchResult) {
-  if this.is_null() {
-    return;
-  }
-  let runnable = unsafe { &mut *this }.runnable.take();
-  match runnable {
-    Some(Runnable::Execute {
-      rust_dispatcher,
-      command,
-      dispatchable,
-    }) => unsafe {
+  // Since rusty_v8 v152.0.0 there is no probe phase: `BASE__Dispatch` takes a
+  // live `&Dispatchable` and runs the command, reporting whether it handled it.
+  // Calling it twice, as the probe-then-execute split did, would run the
+  // command twice and send two responses.
+  let handled = match dd_ptr {
+    None => false,
+    Some(dd) => unsafe {
       crdtp__DomainDispatcher__BASE__Dispatch(
-        rust_dispatcher,
+        (*dd).rust_dispatcher,
         command.as_ptr(),
         command.len(),
-        dispatchable,
-      );
+        dispatchable as *const c_void,
+      )
     },
-    Some(Runnable::NotFound {
-      channel,
-      call_id,
-      has_call_id,
-      method,
-    }) => {
-      // Real crdtp replies with a MethodNotFound error response.
-      if has_call_id && !channel.is_null() {
-        let method_str = String::from_utf8_lossy(&method);
-        let resp = DispatchResponse {
-          kind: RespKind::Error,
-          code: -32601,
-          message: format!("'{method_str}' wasn't found"),
-        };
-        let bytes = error_response_json(call_id, &resp);
-        let msg = serializable_ptr(bytes);
-        unsafe {
-          crdtp__FrontendChannel__BASE__sendProtocolResponse(
-            channel,
-            call_id,
-            msg as *mut c_void,
-          );
-        }
+  };
+
+  if !handled {
+    // An unhandled method goes to the embedder's fallthrough callback when one
+    // was registered. Only without it does crdtp answer the request itself,
+    // with a MethodNotFound error response.
+    let channel = uber.channel;
+    let call_id = d.call_id;
+    let has_call_id = d.has_call_id;
+    let method = d.method.clone();
+    if !d.fallthrough.is_null() {
+      unsafe {
+        crdtp__FallthroughCallback__Run(
+          d.fallthrough,
+          call_id,
+          method.as_ptr(),
+          method.len(),
+          d.message.as_ptr(),
+          d.message.len(),
+          d.associated_data.as_ptr(),
+          d.associated_data.len(),
+        );
+      }
+      return;
+    }
+    if has_call_id && !channel.is_null() {
+      let method_str = String::from_utf8_lossy(&method);
+      let resp = DispatchResponse {
+        kind: RespKind::Error,
+        code: -32601,
+        message: format!("'{method_str}' wasn't found"),
+      };
+      let bytes = error_response_json(call_id, &resp);
+      let msg = serializable_ptr(bytes);
+      unsafe {
+        crdtp__FrontendChannel__BASE__sendProtocolResponse(
+          channel,
+          call_id,
+          msg as *mut c_void,
+        );
       }
     }
-    None => {}
   }
 }
 

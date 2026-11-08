@@ -990,6 +990,41 @@ pub extern "C" fn v8__Script__Compile(
   intern_ctx::<Script>(ctx, src_val)
 }
 
+thread_local! {
+  // Script id per compiled script, assigned on first request. A `Script` and
+  // its `UnboundScript` are the same source value here, so they share one.
+  static SCRIPT_IDS: std::cell::RefCell<std::collections::HashMap<usize, int>> =
+    std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+static NEXT_SCRIPT_ID: std::sync::atomic::AtomicI32 =
+  std::sync::atomic::AtomicI32::new(1);
+
+/// JSC does not expose its `SourceID`, so ids are this backend's own: stable
+/// and positive for a given script, distinct between scripts.
+fn script_id_of(script: JSValueRef) -> int {
+  if script.is_null() {
+    return 0;
+  }
+  SCRIPT_IDS.with(|m| {
+    *m.borrow_mut().entry(script as usize).or_insert_with(|| {
+      NEXT_SCRIPT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    })
+  })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Script__ScriptId(script: *const Script) -> int {
+  script_id_of(jsval(script))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__UnboundScript__ScriptId(
+  unbound_script: *const UnboundScript,
+) -> int {
+  script_id_of(jsval(unbound_script))
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Script__GetUnboundScript(
   script: *const Script,
@@ -1304,7 +1339,16 @@ unsafe fn cached_data_bytes<'a>(source: *mut Source) -> Option<&'a [u8]> {
     if raw.data.is_null() || raw.length <= 0 {
       return None;
     }
-    Some(std::slice::from_raw_parts(raw.data, raw.length as usize))
+    let bytes = std::slice::from_raw_parts(raw.data, raw.length as usize);
+    // Bytes this backend did not frame (foreign data, or a cache written
+    // before the framing existed) are rejected so deno regenerates them.
+    match code_cache_payload(bytes) {
+      Ok(payload) => Some(payload),
+      Err(_) => {
+        raw.rejected = true;
+        None
+      }
+    }
   }
 }
 
@@ -2269,7 +2313,7 @@ pub extern "C" fn v8__UnboundScript__CreateCodeCache(
             .to_vec()
             .into_boxed_slice();
           unsafe { v82jsc_bytecode_free(p) };
-          return cached_data_from_bytes(bytes);
+          return cached_data_from_bytes(frame_code_cache(&bytes));
         }
       }
     }
@@ -2306,6 +2350,107 @@ pub extern "C" fn v8__UnboundModuleScript__CreateCodeCache(
   make_placeholder_code_cache()
 }
 
+// Code caches this backend hands out are framed with a small header, so that
+// `CachedData::CompatibilityCheck` can tell them from foreign bytes the way
+// V8 checks its own magic number and version:
+//
+// | bytes | contents                                        |
+// |-------|-------------------------------------------------|
+// | 0..4  | `CODE_CACHE_MAGIC`                              |
+// | 4..8  | `CachedDataVersionTag()`, little endian         |
+// | 8..12 | payload length, little endian                   |
+// | 12..  | payload: JSC bytecode, or empty for placeholder |
+
+const CODE_CACHE_MAGIC: [u8; 4] = *b"v8xj";
+const CODE_CACHE_HEADER_LEN: usize = 12;
+
+// `v8::ScriptCompiler::CachedData::CompatibilityCheckResult` values.
+const CACHE_CHECK_SUCCESS: i32 = 0;
+const CACHE_CHECK_MAGIC_NUMBER_MISMATCH: i32 = 1;
+const CACHE_CHECK_VERSION_MISMATCH: i32 = 2;
+const CACHE_CHECK_INVALID_HEADER: i32 = 7;
+const CACHE_CHECK_LENGTH_MISMATCH: i32 = 8;
+
+fn frame_code_cache(payload: &[u8]) -> Box<[u8]> {
+  let mut out = Vec::with_capacity(CODE_CACHE_HEADER_LEN + payload.len());
+  out.extend_from_slice(&CODE_CACHE_MAGIC);
+  out.extend_from_slice(
+    &v8__ScriptCompiler__CachedDataVersionTag().to_le_bytes(),
+  );
+  out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+  out.extend_from_slice(payload);
+  out.into_boxed_slice()
+}
+
+/// The payload of a framed code cache, or the `CompatibilityCheckResult`
+/// explaining why `bytes` is not one.
+fn code_cache_payload(bytes: &[u8]) -> Result<&[u8], i32> {
+  if bytes.len() < CODE_CACHE_HEADER_LEN {
+    return Err(CACHE_CHECK_INVALID_HEADER);
+  }
+  let word = |i: usize| {
+    u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]])
+  };
+  if bytes[0..4] != CODE_CACHE_MAGIC {
+    return Err(CACHE_CHECK_MAGIC_NUMBER_MISMATCH);
+  }
+  if word(4) != v8__ScriptCompiler__CachedDataVersionTag() {
+    return Err(CACHE_CHECK_VERSION_MISMATCH);
+  }
+  if word(8) as usize != bytes.len() - CODE_CACHE_HEADER_LEN {
+    return Err(CACHE_CHECK_LENGTH_MISMATCH);
+  }
+  Ok(&bytes[CODE_CACHE_HEADER_LEN..])
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ScriptCompiler__CachedData__CompatibilityCheck(
+  this: *mut CachedData<'_>,
+  _isolate: *mut RealIsolate,
+) -> int {
+  #[repr(C)]
+  struct RawCachedData {
+    data: *const u8,
+    length: i32,
+    rejected: bool,
+    buffer_policy: i32,
+  }
+  let Some(raw) = (unsafe { (this as *const RawCachedData).as_ref() }) else {
+    return CACHE_CHECK_INVALID_HEADER;
+  };
+  if raw.data.is_null() || raw.length <= 0 {
+    return CACHE_CHECK_INVALID_HEADER;
+  }
+  let bytes =
+    unsafe { std::slice::from_raw_parts(raw.data, raw.length as usize) };
+  match code_cache_payload(bytes) {
+    Ok(_) => CACHE_CHECK_SUCCESS,
+    Err(code) => code,
+  }
+}
+
+/// `v8::ScriptCompiler::CompileOptionsIsValid`.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ScriptCompiler__CompileOptionsIsValid(
+  compile_options: int,
+) -> bool {
+  let consume_code_cache = CompileOptions::ConsumeCodeCache.bits();
+  let eager_compile = CompileOptions::EagerCompile.bits();
+  let produce_and_consume_hints = CompileOptions::ProduceCompileHints.bits()
+    | CompileOptions::ConsumeCompileHints.bits();
+  // kConsumeCodeCache and kEagerCompile are each exclusive with every other
+  // flag, and compile hints cannot be produced and consumed at once.
+  if compile_options & consume_code_cache != 0
+    && compile_options != consume_code_cache
+  {
+    return false;
+  }
+  if compile_options & eager_compile != 0 && compile_options != eager_compile {
+    return false;
+  }
+  compile_options & produce_and_consume_hints != produce_and_consume_hints
+}
+
 pub(crate) fn make_placeholder_code_cache() -> *mut CachedData<'static> {
   #[repr(C)]
   struct RawCachedData {
@@ -2315,7 +2460,7 @@ pub(crate) fn make_placeholder_code_cache() -> *mut CachedData<'static> {
     buffer_policy: i32,
   }
 
-  let v = vec![0u8; 1].into_boxed_slice();
+  let v = frame_code_cache(&[]);
   let len = v.len() as i32;
   let data = Box::into_raw(v) as *const u8;
   let boxed = Box::new(RawCachedData {
@@ -3449,6 +3594,13 @@ pub extern "C" fn v8__Module__IsGraphAsync(this: *const Module) -> bool {
   }
   let mut seen = Vec::new();
   graph_async(this, &mut seen)
+}
+
+/// Whether this module's own source uses top-level `await`, decided when it
+/// was compiled. Unlike `IsGraphAsync`, dependencies do not count.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Module__HasTopLevelAwait(this: *const Module) -> bool {
+  module_state(this).is_some_and(|m| m.is_async)
 }
 
 #[unsafe(no_mangle)]

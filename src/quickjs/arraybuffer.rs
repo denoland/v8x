@@ -167,6 +167,9 @@ struct BsInner {
   byte_length: usize,
   is_shared: bool,
   is_resizable_by_user_javascript: bool,
+  // The length `byte_length` may grow to. Equal to `byte_length` unless the
+  // store is resizable (V8 reports a fixed store's own length as its maximum).
+  max_byte_length: usize,
 
   deleter: BackingStoreDeleterCallback,
   deleter_data: *mut c_void,
@@ -228,6 +231,7 @@ impl BsInner {
       byte_length,
       is_shared,
       is_resizable_by_user_javascript: false,
+      max_byte_length: byte_length,
       deleter,
       deleter_data,
       owns_malloc,
@@ -348,6 +352,10 @@ fn backing_store_for_buffer(
   unsafe {
     (*inner).is_resizable_by_user_javascript =
       is_resizable_by_user_javascript(ctx, buf, false);
+    if (*inner).is_resizable_by_user_javascript {
+      (*inner).max_byte_length =
+        read_len_prop(ctx, buf, c"maxByteLength".as_ptr()).max(len);
+    }
     (*inner).retained_ctx = ctx;
     (*inner).retained_val = JS_DupValue(ctx, buf);
   }
@@ -772,6 +780,10 @@ pub extern "C" fn v8__ArrayBuffer__New__with_backing_store(
   if inner.is_null() {
     return ptr::null();
   }
+  if unsafe { (*inner).is_resizable_by_user_javascript && !(*inner).is_shared }
+  {
+    return unsafe { resizable_array_buffer_for_store(ctx, inner) };
+  }
   let (data, len, deleter_data) =
     unsafe { ((*inner).data, (*inner).byte_length, (*inner).deleter_data) };
 
@@ -1005,11 +1017,8 @@ pub extern "C" fn v8__BackingStore__Data(
   this: *const BackingStore,
 ) -> *mut c_void {
   bs_inner(this).map_or(ptr::null_mut(), |b| {
-    if b.byte_length == 0 {
-      ptr::null_mut()
-    } else {
-      b.data
-    }
+    let (data, len) = refresh_resizable_alias(b);
+    if len == 0 { ptr::null_mut() } else { data }
   })
 }
 
@@ -1017,7 +1026,7 @@ pub extern "C" fn v8__BackingStore__Data(
 pub extern "C" fn v8__BackingStore__ByteLength(
   this: *const BackingStore,
 ) -> usize {
-  bs_inner(this).map_or(0, |b| b.byte_length)
+  bs_inner(this).map_or(0, |b| refresh_resizable_alias(b).1)
 }
 
 #[unsafe(no_mangle)]
@@ -1584,4 +1593,331 @@ pub extern "C" fn v8__SharedArrayBuffer__New__with_byte_length(
   }
   owner_add(data as usize, inner);
   intern::<SharedArrayBuffer>(obj)
+}
+
+/// Bind a resizable backing store to a JS `ArrayBuffer`.
+///
+/// QuickJS only resizes buffers whose memory it allocated itself, so the store
+/// cannot be handed to `JS_NewArrayBuffer` the way fixed stores are. Instead
+/// the engine allocates a resizable buffer of the same shape, the store's bytes
+/// move into it, and the store becomes an alias of that buffer, exactly like a
+/// store obtained from `GetBackingStore`. Later reads of the store's data and
+/// length go back to the buffer, because a resize may move the bytes.
+unsafe fn resizable_array_buffer_for_store(
+  ctx: *mut JSContext,
+  inner: *mut BsInner,
+) -> *const ArrayBuffer {
+  let b = unsafe { &mut *inner };
+  if !b.retained_ctx.is_null() {
+    // Already bound: V8 hands out another ArrayBuffer over the same memory,
+    // and the closest QuickJS equivalent is the buffer the store aliases.
+    return intern::<ArrayBuffer>(unsafe {
+      JS_DupValue(b.retained_ctx, b.retained_val)
+    });
+  }
+  let obj = unsafe {
+    let global = JS_GetGlobalObject(ctx);
+    let ctor = JS_GetPropertyStr(ctx, global, c"ArrayBuffer".as_ptr());
+    JS_FreeValue(ctx, global);
+    let options = JS_NewObject(ctx);
+    JS_SetPropertyStr(
+      ctx,
+      options,
+      c"maxByteLength".as_ptr(),
+      JS_NewInt64(ctx, b.max_byte_length as i64),
+    );
+    let mut args = [JS_NewInt64(ctx, b.byte_length as i64), options];
+    let obj = JS_CallConstructor(ctx, ctor, 2, args.as_mut_ptr());
+    JS_FreeValue(ctx, ctor);
+    JS_FreeValue(ctx, args[0]);
+    JS_FreeValue(ctx, args[1]);
+    obj
+  };
+  if obj.tag == JS_TAG_EXCEPTION {
+    unsafe { clear_pending(ctx) };
+    return ptr::null();
+  }
+  let mut len: usize = 0;
+  let data = unsafe { JS_GetArrayBuffer(ctx, &mut len, obj) } as *mut c_void;
+  if data.is_null() {
+    unsafe { clear_pending(ctx) };
+    unsafe { JS_FreeValue(ctx, obj) };
+    return ptr::null();
+  }
+  let copy_len = len.min(b.byte_length);
+  if copy_len != 0 && !b.data.is_null() {
+    unsafe { ptr::copy_nonoverlapping(b.data, data, copy_len) };
+  }
+  let old_data = b.data;
+  owner_remove(old_data as usize, inner);
+  registry_remove(old_data as usize, inner);
+  if !old_data.is_null() {
+    if b.owns_malloc {
+      unsafe { free(old_data) };
+    } else {
+      unsafe { (b.deleter)(old_data, b.byte_length, b.deleter_data) };
+    }
+  }
+  b.data = data;
+  b.byte_length = len;
+  b.owns_malloc = false;
+  b.deleter = noop_deleter;
+  b.deleter_data = ptr::null_mut();
+  b.retained_ctx = ctx;
+  b.retained_val = unsafe { JS_DupValue(ctx, obj) };
+  registry_add(data as usize, inner);
+  intern::<ArrayBuffer>(obj)
+}
+
+/// Re-read the data pointer and length of a store that aliases a resizable
+/// JS buffer, since `resize()` reallocates the buffer's memory.
+fn refresh_resizable_alias(b: &BsInner) -> (*mut c_void, usize) {
+  if !b.is_resizable_by_user_javascript || b.retained_ctx.is_null() {
+    return (b.data, b.byte_length);
+  }
+  let mut len: usize = 0;
+  let data =
+    unsafe { JS_GetArrayBuffer(b.retained_ctx, &mut len, b.retained_val) };
+  if data.is_null() {
+    unsafe { clear_pending(b.retained_ctx) };
+    return (ptr::null_mut(), 0);
+  }
+  (data as *mut c_void, len)
+}
+
+fn try_new_allocated(
+  byte_length: usize,
+  is_shared: bool,
+  on_failure: crate::BackingStoreOnFailureMode,
+) -> *mut BackingStore {
+  let fail = || {
+    if matches!(on_failure, crate::BackingStoreOnFailureMode::ReturnNull) {
+      return ptr::null_mut();
+    }
+    // V8 treats this as a fatal out-of-memory condition.
+    eprintln!("Fatal JavaScript out of memory: NewBackingStore");
+    std::process::abort();
+  };
+  if byte_length > crate::binding::v8__TypedArray__kMaxByteLength {
+    return fail();
+  }
+  let data = if byte_length == 0 {
+    ptr::null_mut()
+  } else {
+    unsafe { calloc(byte_length, 1) }
+  };
+  if data.is_null() && byte_length != 0 {
+    return fail();
+  }
+  BsInner::boxed(
+    data,
+    byte_length,
+    is_shared,
+    noop_deleter,
+    ptr::null_mut(),
+    true,
+  ) as *mut BackingStore
+}
+
+// The initialization mode only matters for speed: the memory comes from
+// `calloc` either way, so "uninitialized" stores read as zero.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ArrayBuffer__NewBackingStore__with_mode(
+  _isolate: *mut RealIsolate,
+  byte_length: usize,
+  _initialization_mode: crate::BackingStoreInitializationMode,
+  on_failure: crate::BackingStoreOnFailureMode,
+) -> *mut BackingStore {
+  try_new_allocated(byte_length, false, on_failure)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__SharedArrayBuffer__NewBackingStore__with_mode(
+  _isolate: *mut RealIsolate,
+  byte_length: usize,
+  _initialization_mode: crate::BackingStoreInitializationMode,
+  on_failure: crate::BackingStoreOnFailureMode,
+) -> *mut BackingStore {
+  try_new_allocated(byte_length, true, on_failure)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ArrayBuffer__NewResizableBackingStore(
+  byte_length: usize,
+  max_byte_length: usize,
+) -> *mut BackingStore {
+  let inner = BsInner::new_allocated(byte_length, false);
+  unsafe {
+    (*inner).is_resizable_by_user_javascript = true;
+    (*inner).max_byte_length = max_byte_length.max(byte_length);
+  }
+  inner as *mut BackingStore
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__BackingStore__MaxByteLength(
+  this: *const BackingStore,
+) -> usize {
+  bs_inner(this)
+    .map_or(0, |b| b.max_byte_length.max(refresh_resizable_alias(b).1))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ArrayBuffer__MaybeNew(
+  isolate: *mut RealIsolate,
+  byte_length: usize,
+  _initialization_mode: crate::BackingStoreInitializationMode,
+) -> *const ArrayBuffer {
+  if byte_length > crate::binding::v8__TypedArray__kMaxByteLength {
+    return ptr::null();
+  }
+  let st = iso_state(isolate);
+  let ctx = st.contexts.last().copied().unwrap_or(st.ctx);
+  if ctx.is_null() {
+    return ptr::null();
+  }
+  let obj = new_array_buffer_value(ctx, isolate, byte_length);
+  if obj.tag == JS_TAG_EXCEPTION {
+    // MaybeNew reports failure through the empty handle, not an exception.
+    unsafe { clear_pending(ctx) };
+    return ptr::null();
+  }
+  intern::<ArrayBuffer>(obj)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ArrayBuffer__IsResizableByUserJavaScript(
+  this: *const ArrayBuffer,
+) -> bool {
+  let ctx = current_ctx();
+  if ctx.is_null() || this.is_null() {
+    return false;
+  }
+  unsafe { is_resizable_by_user_javascript(ctx, jsval_of(this), false) }
+}
+
+unsafe extern "C" {
+  fn JS_IsImmutableArrayBuffer(obj: JSValue) -> std::os::raw::c_int;
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ArrayBuffer__IsImmutable(
+  this: *const ArrayBuffer,
+) -> bool {
+  !this.is_null() && unsafe { JS_IsImmutableArrayBuffer(jsval_of(this)) } > 0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__SharedArrayBuffer__Data(
+  this: *const SharedArrayBuffer,
+) -> *mut c_void {
+  let ctx = current_ctx();
+  if ctx.is_null() || this.is_null() {
+    return ptr::null_mut();
+  }
+  let mut len: usize = 0;
+  let data = unsafe { JS_GetArrayBuffer(ctx, &mut len, jsval_of(this)) };
+  if data.is_null() {
+    unsafe { clear_pending(ctx) };
+  }
+  data as *mut c_void
+}
+
+macro_rules! typed_array_new_with_shared_buffer {
+  ($fn_name:ident, $ty_name:ident, $qjs_ty:expr) => {
+    #[unsafe(no_mangle)]
+    pub extern "C" fn $fn_name(
+      buf_ptr: *const SharedArrayBuffer,
+      byte_offset: usize,
+      length: usize,
+    ) -> *const crate::$ty_name {
+      let v = make_typed_array(
+        buf_ptr as *const ArrayBuffer,
+        byte_offset,
+        length,
+        $qjs_ty,
+      );
+      if v.tag == JS_TAG_EXCEPTION {
+        let ctx = current_ctx();
+        if !ctx.is_null() {
+          unsafe { clear_pending(ctx) };
+        }
+        return ptr::null();
+      }
+      if v.tag != JS_TAG_OBJECT {
+        return ptr::null();
+      }
+      intern::<crate::$ty_name>(v)
+    }
+  };
+}
+
+typed_array_new_with_shared_buffer!(
+  v8__Uint8Array__New__with_shared_buffer,
+  Uint8Array,
+  JS_TYPED_ARRAY_UINT8
+);
+typed_array_new_with_shared_buffer!(
+  v8__Int8Array__New__with_shared_buffer,
+  Int8Array,
+  JS_TYPED_ARRAY_INT8
+);
+typed_array_new_with_shared_buffer!(
+  v8__Uint16Array__New__with_shared_buffer,
+  Uint16Array,
+  JS_TYPED_ARRAY_UINT16
+);
+typed_array_new_with_shared_buffer!(
+  v8__Int16Array__New__with_shared_buffer,
+  Int16Array,
+  JS_TYPED_ARRAY_INT16
+);
+typed_array_new_with_shared_buffer!(
+  v8__Uint32Array__New__with_shared_buffer,
+  Uint32Array,
+  JS_TYPED_ARRAY_UINT32
+);
+typed_array_new_with_shared_buffer!(
+  v8__Int32Array__New__with_shared_buffer,
+  Int32Array,
+  JS_TYPED_ARRAY_INT32
+);
+typed_array_new_with_shared_buffer!(
+  v8__Float16Array__New__with_shared_buffer,
+  Float16Array,
+  JS_TYPED_ARRAY_FLOAT16
+);
+typed_array_new_with_shared_buffer!(
+  v8__Float32Array__New__with_shared_buffer,
+  Float32Array,
+  JS_TYPED_ARRAY_FLOAT32
+);
+typed_array_new_with_shared_buffer!(
+  v8__Float64Array__New__with_shared_buffer,
+  Float64Array,
+  JS_TYPED_ARRAY_FLOAT64
+);
+typed_array_new_with_shared_buffer!(
+  v8__BigInt64Array__New__with_shared_buffer,
+  BigInt64Array,
+  JS_TYPED_ARRAY_BIG_INT64
+);
+typed_array_new_with_shared_buffer!(
+  v8__BigUint64Array__New__with_shared_buffer,
+  BigUint64Array,
+  JS_TYPED_ARRAY_BIG_UINT64
+);
+typed_array_new_with_shared_buffer!(
+  v8__Uint8ClampedArray__New__with_shared_buffer,
+  Uint8ClampedArray,
+  JS_TYPED_ARRAY_UINT8C
+);
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__DataView__New__with_shared_buffer(
+  sab: *const SharedArrayBuffer,
+  byte_offset: usize,
+  length: usize,
+) -> *const DataView {
+  v8__DataView__New(sab as *const ArrayBuffer, byte_offset, length)
 }

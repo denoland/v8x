@@ -128,14 +128,25 @@ pub extern "C" fn v8__Boolean__New(
   isolate: *mut RealIsolate,
   value: bool,
 ) -> *const Boolean {
-  let st = iso_state(isolate);
-  let ctx =
-    st.contexts.last().copied().unwrap_or(ptr::null_mut()) as JSContextRef;
+  // V8 creates booleans without an entered context.
+  let ctx = crate::jsc::core::ensure_ctx(isolate);
   if ctx.is_null() {
     return ptr::null();
   }
   let v = unsafe { JSValueMakeBoolean(ctx, value) };
   intern_ctx::<Boolean>(ctx, v)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Boolean__Value(this: *const Boolean) -> bool {
+  if this.is_null() {
+    return false;
+  }
+  let ctx = crate::jsc::core::ensure_ctx(current_iso());
+  if ctx.is_null() {
+    return false;
+  }
+  unsafe { JSValueToBoolean(ctx, jsval(this)) }
 }
 
 #[unsafe(no_mangle)]
@@ -564,6 +575,23 @@ well_known_symbol!(v8__Symbol__GetToPrimitive, "Symbol.toPrimitive");
 well_known_symbol!(v8__Symbol__GetToStringTag, "Symbol.toStringTag");
 well_known_symbol!(v8__Symbol__GetUnscopables, "Symbol.unscopables");
 
+// `Symbol.dispose` and `Symbol.asyncDispose` (explicit resource management)
+// are missing from JavaScriptCore builds that predate the proposal. Install
+// the symbol on the realm's `Symbol` the first time it is asked for, so the
+// handle returned is the same one JS sees as `Symbol.dispose`.
+well_known_symbol!(
+  v8__Symbol__GetDispose,
+  "(typeof Symbol.dispose === 'symbol' ? Symbol.dispose : \
+   (Object.defineProperty(Symbol, 'dispose', \
+     {value: Symbol('Symbol.dispose')}), Symbol.dispose))"
+);
+well_known_symbol!(
+  v8__Symbol__GetAsyncDispose,
+  "(typeof Symbol.asyncDispose === 'symbol' ? Symbol.asyncDispose : \
+   (Object.defineProperty(Symbol, 'asyncDispose', \
+     {value: Symbol('Symbol.asyncDispose')}), Symbol.asyncDispose))"
+);
+
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Data__EQ(this: *const Data, other: *const Data) -> bool {
   let ctx = current_ctx();
@@ -576,6 +604,18 @@ pub extern "C" fn v8__Data__EQ(this: *const Data, other: *const Data) -> bool {
     return false;
   }
   unsafe { JSValueIsStrictEqual(ctx, a, b) }
+}
+
+/// V8 rejects a handle whose heap object lives in another isolate. JSC's
+/// public API cannot tell which `JSContextGroupRef` a value belongs to, and
+/// rusty_v8 calls this on every `Local` dereference in debug builds, so every
+/// handle is accepted.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Data__IsCompatibleWithIsolate(
+  _this: *const Data,
+  _isolate: *const RealIsolate,
+) -> bool {
+  true
 }
 
 #[unsafe(no_mangle)]
@@ -597,6 +637,13 @@ pub extern "C" fn v8__Data__IsPrimitive(this: *const Data) -> bool {
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Data__IsFunctionTemplate(this: *const Data) -> bool {
   false
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Data__IsDictionaryTemplate(this: *const Data) -> bool {
+  crate::jsc::function::is_dictionary_template(
+    this as *const std::os::raw::c_void,
+  )
 }
 
 #[unsafe(no_mangle)]

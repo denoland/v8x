@@ -9,7 +9,7 @@ Docs: https://littledivy.github.io/v8x · Test dashboard: https://littledivy.git
 
 Supported engines:
 
-- V8 14.9.207.2-rusty
+- V8 15.2.124.1-rusty
 - JavaScriptCore / WebKit 625.1+ and System-framework path uses the OS's JSC.
 - QuickJS-ng 0.15.1 
 
@@ -31,7 +31,7 @@ on the chosen engine, so the swap is a drop-in — `deno_core` compiles unchange
 
 | engine | deno size | engine size |
 | --- | --- | --- |
-| Deno V8 14.9 | 78.7 MB | ~40 MB static |
+| Deno V8 15.2 | 78.7 MB | ~40 MB static |
 | Deno JSC | 80.7 MB | ~48 MB static |
 | Deno system JSC | 54.2 MB | 0 |
 | Deno quickjs-ng | 56.1 MB | ~1 MB static |

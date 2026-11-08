@@ -345,6 +345,10 @@ pub(crate) fn note_compilation_cache_miss() {
 pub(crate) struct IsoState {
   pub rt: *mut JSRuntime,
 
+  /// Serializes the threads that use this isolate, for `v8::Locker`. Unused
+  /// until the embedder converts the isolate with `try_into_shared`.
+  pub lock: super::locker::IsolateLock,
+
   pub ctx: *mut JSContext,
 
   pub contexts: Vec<*mut JSContext>,
@@ -480,6 +484,16 @@ pub(crate) struct IsoState {
   pub continuation_data: JSValue,
 
   pub continuation_hooks_enabled: bool,
+
+  /// The isolate's reference to its `IsolateGroup` (see `isolate.rs`).
+  pub group: *const super::isolate::IsolateGroupInner,
+
+  /// `Isolate::SetModifyCodeGenerationFromStringsCallback`.
+  pub modify_codegen_callback:
+    Option<super::isolate::ModifyCodeGenerationFromStringsCallback>,
+
+  /// Contexts whose global object was detached (`Context::DetachGlobal`).
+  pub detached_contexts: std::collections::HashSet<usize>,
 }
 
 impl IsoState {
@@ -923,6 +937,7 @@ pub extern "C" fn v8__Isolate__New(params: *const c_void) -> *mut RealIsolate {
     .unwrap_or_default();
   let state = Box::new(IsoState {
     rt,
+    lock: super::locker::IsolateLock::new(),
     ctx,
     contexts: Vec::new(),
     handles: Vec::new(),
@@ -985,8 +1000,15 @@ pub extern "C" fn v8__Isolate__New(params: *const c_void) -> *mut RealIsolate {
     context_microtask_queues: HashMap::new(),
     continuation_data: jsv_undefined(),
     continuation_hooks_enabled: false,
+    group: super::isolate::default_isolate_group(),
+    modify_codegen_callback: None,
+    detached_contexts: std::collections::HashSet::new(),
   });
   let iso = Box::into_raw(state) as *mut RealIsolate;
+  super::isolate::set_microtask_queue_isolate(
+    iso_state(iso).default_microtask_queue,
+    iso,
+  );
   // Arm the interrupt handler so a runaway loop unwinds once
   // `TerminateExecution` is requested (the op-dispatch boundary handles the
   // common "next op after terminate" case directly). The opaque is the isolate
@@ -1111,8 +1133,13 @@ pub extern "C" fn v8__Isolate__Dispose(this: *mut RealIsolate) {
     {
       super::allocator::allocator_free(allocator, data, byte_length);
     }
+    let contexts: Vec<usize> =
+      st.context_microtask_queues.keys().copied().collect();
+    for ctx in contexts {
+      super::isolate::dissociate_microtask_queue(&mut st, ctx);
+    }
     super::isolate::drop_microtask_queue_state(st.default_microtask_queue);
-    st.context_microtask_queues.clear();
+    super::isolate::release_isolate_group(st.group);
   }
   super::module::discard_module_caches(this);
   remove_current_iso(this);
@@ -1131,6 +1158,17 @@ pub extern "C" fn v8__Isolate__Exit(this: *mut RealIsolate) {
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Isolate__GetCurrent() -> *mut RealIsolate {
   current_iso()
+}
+
+/// Unlike `GetCurrent`, this reports only an isolate that is actually entered.
+/// `current_iso` falls back to the last isolate this thread ran, which is what
+/// callbacks arriving outside an Enter/Exit pair need, but `v8::Locker` uses
+/// this to assert that no isolate is entered before it takes the lock, and
+/// that fallback would make the assert fire on a thread that had merely used
+/// an isolate earlier.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Isolate__TryGetCurrent() -> *mut RealIsolate {
+  CURRENT_ISO.with(|c| *c.borrow())
 }
 
 #[unsafe(no_mangle)]
@@ -1299,8 +1337,11 @@ pub extern "C" fn v8__Context__New(
     c
   };
   if !microtask_queue.is_null() {
-    st.context_microtask_queues
-      .insert(ctx as usize, microtask_queue as *mut MicrotaskQueue);
+    super::isolate::associate_microtask_queue(
+      st,
+      ctx as usize,
+      microtask_queue as *mut MicrotaskQueue,
+    );
   }
   let snapshot = st
     .restored_snapshot
@@ -1389,8 +1430,11 @@ pub(crate) fn context_from_snapshot(
     c
   };
   if !microtask_queue.is_null() {
-    st.context_microtask_queues
-      .insert(ctx as usize, microtask_queue as *mut MicrotaskQueue);
+    super::isolate::associate_microtask_queue(
+      st,
+      ctx as usize,
+      microtask_queue,
+    );
   }
   install_snapshot_restore_prerequisites(isolate, ctx);
   let external_references = st.external_references.clone();
@@ -1489,6 +1533,7 @@ fn install_default_globals_inner(
     super::isolate::install_shadow_realm(ctx, global);
     super::module::install_dynamic_source_import_global(ctx, global);
     super::arraybuffer::install_array_buffer_constructor(isolate, ctx, global);
+    super::isolate::install_codegen_gate_if_needed(isolate, ctx);
     install_atomics_wait_async_shim(ctx, global);
     if refresh_intrinsics {
       refresh_snapshot_intrinsics(ctx);

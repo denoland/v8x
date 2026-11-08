@@ -1620,7 +1620,7 @@ pub extern "C" fn v8__StartupData__data__DELETE(this: *const c_char) {
 // must return `U_INVALID_FORMAT_ERROR`. No length crosses this C ABI, so we read
 // only the 4 header bytes every real caller is guaranteed to provide.
 #[unsafe(no_mangle)]
-pub extern "C" fn udata_setCommonData_77(
+pub extern "C" fn udata_setCommonData_78(
   data: *const u8,
   error_code: *mut i32,
 ) {
@@ -2083,6 +2083,104 @@ pub extern "C" fn v8__Date__New(
       return ptr::null();
     }
     intern::<crate::Date>(v)
+  }
+}
+
+/// Calls the zero-argument method `name` on `this` and returns its result
+/// (+1), or `None` with the exception cleared.
+unsafe fn call_date_method(
+  ctx: *mut JSContext,
+  this: JSValue,
+  name: &std::ffi::CStr,
+) -> Option<JSValue> {
+  unsafe {
+    let method = JS_GetPropertyStr(ctx, this, name.as_ptr());
+    if !JS_IsFunction(ctx, method) {
+      JS_FreeValue(ctx, method);
+      super::exception::clear_pending(ctx);
+      return None;
+    }
+    let r = JS_Call(ctx, method, this, 0, ptr::null_mut());
+    JS_FreeValue(ctx, method);
+    if r.tag == JS_TAG_EXCEPTION {
+      super::exception::clear_pending(ctx);
+      return None;
+    }
+    Some(r)
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Date__Parse(
+  context: *const Context,
+  date_string: *const crate::String,
+) -> *const crate::Date {
+  let ctx = ctx_of(context);
+  if ctx.is_null() || date_string.is_null() {
+    return ptr::null();
+  }
+  let ms = unsafe {
+    let global = JS_GetGlobalObject(ctx);
+    let ctor = JS_GetPropertyStr(ctx, global, c"Date".as_ptr());
+    JS_FreeValue(ctx, global);
+    let parse = JS_GetPropertyStr(ctx, ctor, c"parse".as_ptr());
+    JS_FreeValue(ctx, ctor);
+    if !JS_IsFunction(ctx, parse) {
+      JS_FreeValue(ctx, parse);
+      super::exception::clear_pending(ctx);
+      return ptr::null();
+    }
+    let mut args = [JS_DupValue(ctx, jsval_of(date_string))];
+    let time = JS_Call(ctx, parse, jsv_undefined(), 1, args.as_mut_ptr());
+    JS_FreeValue(ctx, parse);
+    JS_FreeValue(ctx, args[0]);
+    if time.tag == JS_TAG_EXCEPTION {
+      // A throwing `toString` on the argument is the only way to get here;
+      // leave it pending so the empty handle carries an exception, as in V8.
+      return ptr::null();
+    }
+    let mut ms = f64::NAN;
+    JS_ToFloat64(ctx, &mut ms, time);
+    JS_FreeValue(ctx, time);
+    ms
+  };
+  v8__Date__New(context, ms)
+}
+
+/// Like V8, a date whose time value is NaN stringifies as "Invalid Date"
+/// instead of throwing the RangeError that `toISOString()` throws in JS.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Date__ToISOString(
+  this: *const crate::Date,
+) -> *const crate::String {
+  date_to_string(this, c"toISOString")
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Date__ToUTCString(
+  this: *const crate::Date,
+) -> *const crate::String {
+  date_to_string(this, c"toUTCString")
+}
+
+fn date_to_string(
+  this: *const crate::Date,
+  method: &std::ffi::CStr,
+) -> *const crate::String {
+  let ctx = current_ctx();
+  if ctx.is_null() || this.is_null() {
+    return ptr::null();
+  }
+  if v8__Date__ValueOf(this).is_nan() {
+    const INVALID: &str = "Invalid Date";
+    let s = unsafe {
+      JS_NewStringLen(ctx, INVALID.as_ptr() as *const c_char, INVALID.len())
+    };
+    return intern::<crate::String>(s);
+  }
+  match unsafe { call_date_method(ctx, jsval_of(this), method) } {
+    Some(s) => intern::<crate::String>(s),
+    None => ptr::null(),
   }
 }
 

@@ -57,6 +57,17 @@ pub extern "C" fn v8__V8__InitializePlatform(_platform: *mut Platform) {
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__V8__Initialize() {}
 
+/// WebAssembly runs on the vendored WAMR interpreter here, which detects
+/// out-of-bounds accesses with explicit bounds checks instead of guard pages,
+/// so there is no trap handler to install. Report failure, which is what V8
+/// does on a build without trap-handler support.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__V8__EnableWebAssemblyTrapHandler(
+  _use_v8_signal_handler: bool,
+) -> bool {
+  false
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__V8__Dispose() -> bool {
   if std::env::var_os("V82JSC_COMPILE_STATS").is_some() {

@@ -708,9 +708,16 @@ well_known_symbol!(v8__Symbol__GetSplit, b"split\0");
 well_known_symbol!(v8__Symbol__GetToPrimitive, b"toPrimitive\0");
 well_known_symbol!(v8__Symbol__GetToStringTag, b"toStringTag\0");
 well_known_symbol!(v8__Symbol__GetUnscopables, b"unscopables\0");
+well_known_symbol!(v8__Symbol__GetDispose, b"dispose\0");
+well_known_symbol!(v8__Symbol__GetAsyncDispose, b"asyncDispose\0");
 
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Data__EQ(this: *const Data, other: *const Data) -> bool {
+  // Two handles to one slot always name the same thing. This also covers
+  // templates, whose handles are not JSValue slots at all.
+  if ptr::eq(this, other) {
+    return !this.is_null();
+  }
   let a = jsval_of(this);
   let b = jsval_of(other);
 
@@ -751,6 +758,46 @@ pub extern "C" fn v8__Data__IsPrimitive(this: *const Data) -> bool {
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Data__IsFunctionTemplate(this: *const Data) -> bool {
   template_kind(this as *const _) == Some(TemplKind::Func)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Data__IsDictionaryTemplate(this: *const Data) -> bool {
+  template_kind(this as *const _) == Some(TemplKind::Dict)
+}
+
+/// Whether `this` can be used while scopes of `isolate` are open. Contexts
+/// record the runtime they belong to, so a context of another isolate is
+/// caught. Other values carry no owner that is cheap to read (a QuickJS object
+/// does not point back at its runtime), and this runs on every `Local`
+/// dereference in debug builds, so they are assumed to belong.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Data__IsCompatibleWithIsolate(
+  this: *const Data,
+  isolate: *const RealIsolate,
+) -> bool {
+  if this.is_null() || isolate.is_null() {
+    return true;
+  }
+  let v = jsval_of(this);
+  if v.tag != JS_TAG_V8_CONTEXT || template_kind(this as *const _).is_some() {
+    return true;
+  }
+  let ctx = unsafe { v.u.ptr } as *mut JSContext;
+  let rt = iso_state(isolate as *mut RealIsolate).rt;
+  ctx.is_null() || rt.is_null() || unsafe { JS_GetRuntime(ctx) } == rt
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Boolean__Value(this: *const Boolean) -> bool {
+  if this.is_null() {
+    return false;
+  }
+  let v = jsval_of(this);
+  if v.tag == JS_TAG_BOOL {
+    return unsafe { v.u.int32 } != 0;
+  }
+  let ctx = current_ctx();
+  !ctx.is_null() && unsafe { JS_ToBool(ctx, v) } > 0
 }
 
 #[unsafe(no_mangle)]

@@ -170,6 +170,17 @@ pub extern "C" fn v8__V8__Dispose() -> bool {
   true
 }
 
+/// WebAssembly runs on the WAMR interpreter here, which detects out-of-bounds
+/// accesses with explicit bounds checks instead of guard pages, so there is no
+/// trap handler to install. Report failure, which is what V8 does on a build
+/// without trap-handler support.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__V8__EnableWebAssemblyTrapHandler(
+  _use_v8_signal_handler: bool,
+) -> bool {
+  false
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__V8__DisposePlatform() {
   CURRENT_PLATFORM.store(ptr::null_mut(), Ordering::SeqCst);
