@@ -1,6 +1,6 @@
 # Baseline: tests that PASS for backend=jsc suite=rusty_v8.
 # Ratchet — CI goes red if any of these regress. Add new passes here
-# (run.mjs --update). 47 passing. DO NOT hand-sort; the
+# (run.mjs --update). 57 passing. DO NOT hand-sort; the
 # harness keeps this sorted + unique.
 rv8_slots::context_slots
 rv8_slots::dropped_context_slots_on_kept_context
@@ -13,14 +13,24 @@ rv8_test_api::allow_javascript_execution_scope
 rv8_test_api::allow_scope_in_read_host_object
 rv8_test_api::array
 rv8_test_api::array_buffer
+rv8_test_api::array_buffer_backing_store_modes
+rv8_test_api::array_buffer_maybe_new
+rv8_test_api::array_buffer_resizable_backing_store
 rv8_test_api::array_buffer_view
+rv8_test_api::array_iterate
+rv8_test_api::array_iterate_holey
+rv8_test_api::array_iterate_throws
 rv8_test_api::backing_store_data
 rv8_test_api::backing_store_from_empty_boxed_slice
 rv8_test_api::backing_store_from_empty_vec
+rv8_test_api::backing_store_resizable
 rv8_test_api::bigint
+rv8_test_api::boolean_value
 rv8_test_api::bubbling_up_exception
 rv8_test_api::bubbling_up_exception_in_function_call
+rv8_test_api::cached_data_compatibility_check
 rv8_test_api::cached_data_version_tag
+rv8_test_api::compile_options_is_valid
 rv8_test_api::crdtp_create_error_notification
 rv8_test_api::crdtp_create_error_response
 rv8_test_api::crdtp_create_notification

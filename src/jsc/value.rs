@@ -425,6 +425,34 @@ pub extern "C" fn v8__Value__IsWeakSet(this: *const Value) -> bool {
   class_tag_is(this, "WeakSet")
 }
 
+/// Brand check: `WeakRef.prototype.deref` throws unless its receiver has a
+/// [[WeakRefTarget]] slot, so unlike the `toStringTag` test this cannot be
+/// fooled by an object that merely claims to be a WeakRef.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Value__IsWeakRef(this: *const Value) -> bool {
+  let c = ctx();
+  if c.is_null() || !is_obj(this) {
+    return false;
+  }
+  let r = unsafe {
+    crate::jsc::core::call_js_fn(
+      c,
+      c"(function(v){try{WeakRef.prototype.deref.call(v);return true}\
+         catch(e){return false}})",
+      &[jsval(this)],
+    )
+  };
+  matches!(r, Ok(v) if unsafe { JSValueToBoolean(c, v) })
+}
+
+/// WasmGC's `null` reference is a value of its own in V8. WebAssembly runs on
+/// an interpreter here that does not implement WasmGC, so no such value can
+/// ever reach the embedder.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Value__IsWasmNull(_this: *const Value) -> bool {
+  false
+}
+
 // JSObjectGetProxyTarget (JSObjectRefPrivate.h, a C SPI exported by vendored +
 // system JSC) returns the wrapped target of a Proxy/JSProxy, or null for a
 // non-proxy — exactly the detection v8::Value::IsProxy needs.
@@ -554,7 +582,11 @@ pub extern "C" fn v8__Value__StrictEquals(
   this: *const Value,
   that: *const Value,
 ) -> bool {
-  let c = ctx();
+  // Comparing needs no context in V8; a bare HandleScope still compares.
+  let mut c = ctx();
+  if c.is_null() {
+    c = crate::jsc::core::ensure_ctx(crate::jsc::core::current_iso());
+  }
   !c.is_null() && unsafe { JSValueIsStrictEqual(c, jsval(this), jsval(that)) }
 }
 

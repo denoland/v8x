@@ -80,11 +80,27 @@ unsafe fn make_string_from_utf16(
   }
 }
 
+/// The context to create a string in. V8 creates strings on a bare
+/// `HandleScope` too, so fall back to the isolate's base context when none is
+/// entered.
+fn creation_ctx(isolate: *mut RealIsolate) -> JSContextRef {
+  let ctx = current_ctx();
+  if !ctx.is_null() {
+    return ctx;
+  }
+  let isolate = if isolate.is_null() {
+    current_iso()
+  } else {
+    isolate
+  };
+  crate::jsc::core::ensure_ctx(isolate)
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__String__Empty(
   isolate: *mut RealIsolate,
 ) -> *const V8String {
-  let ctx = current_ctx();
+  let ctx = creation_ctx(isolate);
   unsafe {
     let s = JSStringCreateWithUTF8CString(c"".as_ptr());
     let v = JSValueMakeString(ctx, s);
@@ -100,7 +116,7 @@ pub extern "C" fn v8__String__NewFromUtf8(
   _new_type: NewStringType,
   length: int,
 ) -> *const V8String {
-  let ctx = current_ctx();
+  let ctx = creation_ctx(isolate);
   if length < 0 || data.is_null() {
     return ptr::null();
   }
@@ -122,7 +138,7 @@ pub extern "C" fn v8__String__NewFromOneByte(
   _new_type: NewStringType,
   length: int,
 ) -> *const V8String {
-  let ctx = current_ctx();
+  let ctx = creation_ctx(isolate);
   if length < 0 || data.is_null() {
     return ptr::null();
   }
@@ -142,7 +158,7 @@ pub extern "C" fn v8__String__NewFromTwoByte(
   _new_type: NewStringType,
   length: int,
 ) -> *const V8String {
-  let ctx = current_ctx();
+  let ctx = creation_ctx(isolate);
   if length < 0 || data.is_null() {
     return ptr::null();
   }
@@ -770,6 +786,83 @@ pub extern "C" fn v8__String__Concat(
     let v = make_string_from_utf16(ctx, units.as_ptr(), units.len());
     intern_ctx::<V8String>(ctx, v)
   }
+}
+
+/// The UTF-16 code units of the string value `v`, or `None` if it cannot be
+/// converted.
+unsafe fn utf16_units(ctx: JSContextRef, v: JSValueRef) -> Option<Vec<u16>> {
+  unsafe {
+    let s = JSValueToStringCopy(ctx, v, ptr::null_mut());
+    if s.is_null() {
+      return None;
+    }
+    let len = JSStringGetLength(s);
+    let chars = JSStringGetCharactersPtr(s);
+    let units = if chars.is_null() || len == 0 {
+      Vec::new()
+    } else {
+      std::slice::from_raw_parts(chars, len).to_vec()
+    };
+    JSStringRelease(s);
+    Some(units)
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__String__StringEquals(
+  this: *const V8String,
+  that: *const V8String,
+) -> bool {
+  if this.is_null() || that.is_null() {
+    return this == that;
+  }
+  if this == that {
+    return true;
+  }
+  let ctx = crate::jsc::core::ensure_ctx(current_iso());
+  if ctx.is_null() {
+    return false;
+  }
+  // Strict equality on two strings compares their contents.
+  unsafe { JSValueIsStrictEqual(ctx, jsval(this), jsval(that)) }
+}
+
+/// JSC exposes no string table, so the isolate keeps its own: the first
+/// string internalized with given contents becomes the canonical handle for
+/// them, which makes equal internalized strings the same handle as in V8.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__String__InternalizeString(
+  this: *const V8String,
+  isolate: *mut RealIsolate,
+) -> *const V8String {
+  if this.is_null() {
+    return ptr::null();
+  }
+  let isolate = if isolate.is_null() {
+    current_iso()
+  } else {
+    isolate
+  };
+  if isolate.is_null() {
+    return this;
+  }
+  // Protect the canonical value against the base context, which lives until
+  // `Isolate::Dispose` releases these first.
+  let st = iso_state(isolate);
+  if st.base_ctx.is_null() {
+    st.base_ctx =
+      unsafe { JSGlobalContextCreateInGroup(st.group, ptr::null_mut()) };
+  }
+  let base = st.base_ctx as JSContextRef;
+  let Some(units) = (unsafe { utf16_units(base, jsval(this)) }) else {
+    return this;
+  };
+  let v = *st.internalized.entry(units).or_insert_with(|| {
+    let v = jsval(this);
+    unsafe { JSValueProtect(base, v) };
+    v
+  });
+  intern::<V8String>(v)
 }
 
 #[unsafe(no_mangle)]

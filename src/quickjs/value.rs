@@ -402,6 +402,22 @@ pub extern "C" fn v8__Value__IsWeakSet(this: *const Value) -> bool {
   class_tag_is(this, "WeakSet")
 }
 
+unsafe extern "C" {
+  fn JS_IsWeakRef(val: JSValue) -> bool;
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Value__IsWeakRef(this: *const Value) -> bool {
+  !this.is_null() && unsafe { JS_IsWeakRef(jsval_of(this)) }
+}
+
+/// WebAssembly GC's `null` is a distinct value only inside a Wasm GC engine.
+/// This backend's WebAssembly has no GC proposal, so no JS value is ever one.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Value__IsWasmNull(_this: *const Value) -> bool {
+  false
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Value__IsProxy(this: *const Value) -> bool {
   if this.is_null() {

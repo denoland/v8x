@@ -8,7 +8,7 @@
 # the gitlinks); our edits ship as patches/<name>-NN-*.patch applied to the
 # submodule working tree — never committed into the vendored source.
 #
-#   vendor/rusty_v8     denoland/rusty_v8 @ v152.1.0 — the Rust API surface this
+#   vendor/rusty_v8     denoland/rusty_v8 @ v158.0.0 — the Rust API surface this
 #                       crate IS. src/lib.rs #[path]-includes its modules; our
 #                       shims (src/jsc/, src/quickjs/) replace its C++ binding.cc
 #                       by defining the same ~570 v8__* C-ABI over JSC / QuickJS.

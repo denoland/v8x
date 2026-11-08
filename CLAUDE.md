@@ -1,7 +1,7 @@
 # v82jsc — agent playbook (test hill-climb)
 
 `v82jsc` is a **v8 C-ABI compatibility layer** backed by pluggable JS engines.
-The crate is literally named `v8` (version `152.1.0`) so it drops into Deno via
+The crate is literally named `v8` (version `158.0.0`) so it drops into Deno via
 `[patch.crates-io]`. Backends (exactly one active at a time, feature-gated):
 
 | backend id | features | engine | OS |

@@ -916,3 +916,52 @@ mod tests {
     assert_eq!(locale_compare("a2", "a10", true), Ordering::Less);
   }
 }
+
+unsafe extern "C" {
+  fn JS_IsStrictEqual(ctx: *mut JSContext, op1: JSValue, op2: JSValue) -> bool;
+  fn JS_ValueToAtom(ctx: *mut JSContext, val: JSValue) -> JSAtom;
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__String__StringEquals(
+  this: *const V8String,
+  that: *const V8String,
+) -> bool {
+  if this.is_null() || that.is_null() {
+    return false;
+  }
+  if ptr::eq(this, that) {
+    return true;
+  }
+  let ctx = current_ctx();
+  if ctx.is_null() {
+    return false;
+  }
+  unsafe { JS_IsStrictEqual(ctx, jsval_of(this), jsval_of(that)) }
+}
+
+/// QuickJS interns strings as atoms, so the atom's string is the canonical
+/// copy: equal inputs come back as one and the same string value.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__String__InternalizeString(
+  this: *const V8String,
+  isolate: *mut RealIsolate,
+) -> *const V8String {
+  let ctx = ctx_for(isolate);
+  if ctx.is_null() || this.is_null() {
+    return ptr::null();
+  }
+  let value = jsval_of(this);
+  let atom = unsafe { JS_ValueToAtom(ctx, value) };
+  if atom == 0 {
+    unsafe { super::exception::clear_pending(ctx) };
+    return super::core::intern_dup::<V8String>(ctx, value);
+  }
+  let internalized = unsafe { JS_AtomToString(ctx, atom) };
+  unsafe { JS_FreeAtom(ctx, atom) };
+  if internalized.tag == JS_TAG_EXCEPTION {
+    unsafe { super::exception::clear_pending(ctx) };
+    return super::core::intern_dup::<V8String>(ctx, value);
+  }
+  intern::<V8String>(internalized)
+}

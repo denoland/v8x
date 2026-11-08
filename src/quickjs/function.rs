@@ -250,6 +250,9 @@ struct TemplAccessor {
   native_setter: Option<crate::AccessorNameSetterCallback>,
   data: JSValue,
   attr: u32,
+  /// A lazy data property: the native getter runs once, on first access, and
+  /// its result replaces the accessor with a plain data property.
+  lazy: bool,
 }
 
 struct NamedHandler {
@@ -4245,6 +4248,7 @@ thread_local! {
 pub(crate) enum TemplKind {
   Func,
   Obj,
+  Dict,
 }
 
 fn register_template(p: usize, kind: TemplKind) {
@@ -4324,7 +4328,7 @@ fn with_template_props(
       let t = unsafe { (&*(p as *const ObjTemplate)).state_mut() };
       f(&mut t.props);
     }
-    None => {}
+    Some(TemplKind::Dict) | None => {}
   }
 }
 
@@ -4383,7 +4387,7 @@ const JS_TAG_INTRINSIC: i64 = 0x7634;
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__FunctionTemplate__New(
   isolate: *mut RealIsolate,
-  callback: FunctionCallback,
+  callback: Option<FunctionCallback>,
   data_or_null: *const Value,
   signature_or_null: *const Signature,
   length: i32,
@@ -4393,6 +4397,10 @@ pub extern "C" fn v8__FunctionTemplate__New(
   c_functions_len: usize,
 ) -> *const FunctionTemplate {
   let _ = (isolate, side_effect_type);
+  // A template without a call handler (`FunctionTemplate::New(isolate)`)
+  // behaves as one whose handler does nothing: calls return undefined and
+  // construction returns the new instance.
+  let callback = callback.unwrap_or(noop_function_callback);
   let fast_overloads = copy_fast_overloads(c_functions, c_functions_len);
   let constructable =
     matches!(constructor_behavior, crate::ConstructorBehavior::Allow);
@@ -4433,6 +4441,11 @@ pub extern "C" fn v8__FunctionTemplate__New(
   unsafe { (*instance).state_mut().parent_fn = t };
   register_template(t as usize, TemplKind::Func);
   t as *const FunctionTemplate
+}
+
+unsafe extern "C" fn noop_function_callback(
+  _info: *const FunctionCallbackInfo,
+) {
 }
 
 /// Tape replay: reconstruct a FunctionTemplate (same struct the C-ABI ctor
@@ -4659,7 +4672,7 @@ fn materialize_template_value(
         (jsval_of(o), false)
       }
     }
-    None => (value, false),
+    Some(TemplKind::Dict) | None => (value, false),
   }
 }
 
@@ -5222,6 +5235,7 @@ pub extern "C" fn v8__ObjectTemplate__SetAccessorProperty(
     native_setter: None,
     data: jsv_undefined(),
     attr: attr.as_u32_lenient(),
+    lazy: false,
   });
 }
 
@@ -5262,7 +5276,7 @@ fn apply_accessors(
           acc.native_setter,
           acc.data,
           acc.attr,
-          false,
+          acc.lazy,
         );
         continue;
       }
@@ -5478,6 +5492,7 @@ pub extern "C" fn v8__FunctionTemplate__SetAccessorProperty(
     native_setter: None,
     data: jsv_undefined(),
     attr: attr.as_u32_lenient(),
+    lazy: false,
   });
 }
 
@@ -5643,6 +5658,7 @@ pub extern "C" fn v8__ObjectTemplate__SetNativeDataProperty(
     native_setter: setter,
     data,
     attr: attr.as_u32_lenient(),
+    lazy: false,
   });
 }
 
@@ -5707,4 +5723,177 @@ pub extern "C" fn v8__Template__SetIntrinsicDataProperty(
     intrinsic,
     attr,
   );
+}
+
+fn push_template_accessor(this: *const c_void, accessor: TemplAccessor) {
+  match template_kind(this) {
+    Some(TemplKind::Func) => {
+      let t = unsafe { &mut *(this as *mut FnTemplate) };
+      t.accessors.push(accessor);
+    }
+    Some(TemplKind::Obj) => {
+      let t = unsafe { (&*(this as *const ObjTemplate)).state_mut() };
+      t.accessors.push(accessor);
+    }
+    Some(TemplKind::Dict) | None => {}
+  }
+}
+
+fn native_template_accessor(
+  key: *const Name,
+  getter: crate::AccessorNameGetterCallback,
+  setter: Option<crate::AccessorNameSetterCallback>,
+  data_or_null: *const Value,
+  attr: PropertyAttribute,
+  lazy: bool,
+) -> TemplAccessor {
+  let ctx = current_ctx();
+  TemplAccessor {
+    key: own_template_value(ctx, jsval_of(key)),
+    getter: ptr::null(),
+    setter: ptr::null(),
+    native_getter: Some(getter),
+    native_setter: setter,
+    data: if data_or_null.is_null() {
+      jsv_undefined()
+    } else {
+      own_template_value(ctx, jsval_of(data_or_null))
+    },
+    attr: attr.as_u32_lenient(),
+    lazy,
+  }
+}
+
+/// `Template::SetNativeDataProperty`: on an ObjectTemplate the accessor lands
+/// on every instance, on a FunctionTemplate on the function itself.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Template__SetNativeDataProperty(
+  this: *const crate::Template,
+  key: *const Name,
+  getter: crate::AccessorNameGetterCallback,
+  setter: Option<crate::AccessorNameSetterCallback>,
+  data_or_null: *const Value,
+  attr: PropertyAttribute,
+) {
+  if this.is_null() || key.is_null() {
+    return;
+  }
+  let accessor =
+    native_template_accessor(key, getter, setter, data_or_null, attr, false);
+  push_template_accessor(this as *const c_void, accessor);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Template__SetLazyDataProperty(
+  this: *const crate::Template,
+  key: *const Name,
+  getter: crate::AccessorNameGetterCallback,
+  data_or_null: *const Value,
+  attr: PropertyAttribute,
+) {
+  if this.is_null() || key.is_null() {
+    return;
+  }
+  let accessor =
+    native_template_accessor(key, getter, None, data_or_null, attr, true);
+  push_template_accessor(this as *const c_void, accessor);
+}
+
+/// Whether `value` was constructed by the function of `templ` or of a
+/// template that inherits from it. Construction through a template function
+/// marks the instance as an API wrapper and gives it the template's
+/// prototype, so both are required.
+pub(crate) fn template_has_instance(
+  ctx: *mut JSContext,
+  value: JSValue,
+  templ: *const FunctionTemplate,
+) -> bool {
+  template_kind(templ as *const c_void) == Some(TemplKind::Func)
+    && jsv_is_object(&value)
+    && super::object::is_api_wrapper_value(value)
+    && receiver_matches_signature(ctx, value, templ as *const FnTemplate)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__FunctionTemplate__HasInstance(
+  this: *const FunctionTemplate,
+  object: *const Value,
+) -> bool {
+  let ctx = current_ctx();
+  if ctx.is_null() || this.is_null() || object.is_null() {
+    return false;
+  }
+  template_has_instance(ctx, jsval_of(object), this)
+}
+
+/// `v8::DictionaryTemplate`: a fixed list of property names, filled in with
+/// values at instantiation. The leading slot reads as `undefined` through
+/// `jsval_of`, so code that peeks at a handle's JSValue sees a harmless value.
+struct DictTemplate {
+  _slot: JSValue,
+  names: Vec<std::string::String>,
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__DictionaryTemplate__New(
+  _isolate: *mut RealIsolate,
+  names: *const *const c_char,
+  name_lengths: *const usize,
+  names_len: usize,
+) -> *const crate::DictionaryTemplate {
+  let names = (0..names_len)
+    .map(|i| unsafe {
+      let bytes = std::slice::from_raw_parts(
+        *names.add(i) as *const u8,
+        *name_lengths.add(i),
+      );
+      std::string::String::from_utf8_lossy(bytes).into_owned()
+    })
+    .collect();
+  let t = Box::into_raw(Box::new(DictTemplate {
+    _slot: jsv_undefined(),
+    names,
+  }));
+  register_template(t as usize, TemplKind::Dict);
+  t as *const crate::DictionaryTemplate
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__DictionaryTemplate__NewInstance(
+  this: *const crate::DictionaryTemplate,
+  context: *const Context,
+  values: *const *const Value,
+  values_len: usize,
+) -> *const Object {
+  let ctx = ctx_of(context);
+  if ctx.is_null()
+    || template_kind(this as *const c_void) != Some(TemplKind::Dict)
+  {
+    return ptr::null();
+  }
+  let t = unsafe { &*(this as *const DictTemplate) };
+  let obj = unsafe { JS_NewObject(ctx) };
+  if jsv_is_exception(&obj) {
+    return ptr::null();
+  }
+  for (i, name) in t.names.iter().enumerate().take(values_len) {
+    let value = unsafe { *values.add(i) };
+    // A missing value means the property is left out entirely.
+    if value.is_null() {
+      continue;
+    }
+    let Ok(cname) = std::ffi::CString::new(name.as_str()) else {
+      continue;
+    };
+    unsafe {
+      JS_DefinePropertyValueStr(
+        ctx,
+        obj,
+        cname.as_ptr(),
+        JS_DupValue(ctx, jsval_of(value)),
+        JS_PROP_C_W_E,
+      );
+    }
+  }
+  intern::<Object>(obj)
 }

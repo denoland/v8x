@@ -81,6 +81,10 @@ struct FnTemplate {
   constructable: bool,
 
   cached_proto: JSValueRef,
+
+  /// `Template::SetNativeDataProperty` / `SetLazyDataProperty` entries,
+  /// installed on the function object.
+  natives: Vec<TemplNative>,
 }
 
 struct TemplAccessor {
@@ -98,6 +102,10 @@ struct ObjTemplate {
   /// Set by `SetCallAsFunctionHandler`: instances of this template are
   /// callable and invoke this callback with this data.
   call_handler: Option<(FunctionCallback, JSValueRef)>,
+
+  /// `Template::SetNativeDataProperty` / `SetLazyDataProperty` entries,
+  /// installed on each instance.
+  natives: Vec<TemplNative>,
 
   parent_fn: *const FnTemplate,
 }
@@ -873,6 +881,568 @@ pub extern "C" fn v8__Template__Set(
   });
 }
 
+// ---------------------------------------------------------------------------
+// Native data properties (`Template::SetNativeDataProperty`,
+// `SetLazyDataProperty`, and the `Object` variants).
+//
+// V8 stores these as AccessorInfo and calls the embedder's getter on every
+// read. JSC's C API has no accessor that calls back into C with the property
+// name, so each one is installed as a JS accessor pair whose functions carry a
+// `NativeBridge`. The getter builds a `PropCbInfo`, which is what the
+// `v8__PropertyCallbackInfo__*` accessors below read.
+//
+// Without a setter, a write turns the property into an ordinary data property
+// holding the written value, which is what V8 does by installing
+// `Accessors::ReconfigureToDataProperty` as the default setter. A lazy data
+// property does the same with the getter's result on first read.
+// ---------------------------------------------------------------------------
+
+const ATTR_READ_ONLY: u32 = 1;
+const ATTR_DONT_ENUM: u32 = 2;
+const ATTR_DONT_DELETE: u32 = 4;
+
+#[derive(Clone, Copy)]
+struct TemplNative {
+  key: JSValueRef,
+  getter: crate::AccessorNameGetterCallback,
+  setter: Option<crate::AccessorNameSetterCallback>,
+  data: JSValueRef,
+  attr: u32,
+  lazy: bool,
+}
+
+/// What a `PropertyCallbackInfo` pointer handed to a native accessor points
+/// at.
+#[repr(C)]
+struct PropCbInfo {
+  isolate: *mut RealIsolate,
+  ctx: JSContextRef,
+  holder: JSValueRef,
+  data: JSValueRef,
+  return_slot: JSValueRef,
+}
+
+struct NativeBridge {
+  native: TemplNative,
+  is_setter: bool,
+}
+
+thread_local! {
+    static NATIVE_CLASS: std::cell::Cell<JSClassRef> = const { std::cell::Cell::new(ptr::null_mut()) };
+}
+
+fn native_class() -> JSClassRef {
+  NATIVE_CLASS.with(|c| {
+    let existing = c.get();
+    if !existing.is_null() {
+      return existing;
+    }
+    let def = FnJSClassDefinition {
+      version: 0,
+      attributes: 0,
+      className: c"v8jsc_native_accessor".as_ptr(),
+      parentClass: ptr::null_mut(),
+      staticValues: ptr::null(),
+      staticFunctions: ptr::null(),
+      initialize: ptr::null(),
+      finalize: native_finalize as *const c_void,
+      hasProperty: ptr::null(),
+      getProperty: ptr::null(),
+      setProperty: ptr::null(),
+      deleteProperty: ptr::null(),
+      getPropertyNames: ptr::null(),
+      callAsFunction: native_trampoline as *const c_void,
+      callAsConstructor: ptr::null(),
+      hasInstance: ptr::null(),
+      convertToType: ptr::null(),
+    };
+    let cls =
+      unsafe { JSClassCreate(&def as *const _ as *const JSClassDefinition) };
+    c.set(cls);
+    cls
+  })
+}
+
+unsafe extern "C" fn native_finalize(object: JSObjectRef) {
+  crate::jsc::core::ffi_guard(
+    || {
+      let p = unsafe { JSObjectGetPrivate(object) } as *mut NativeBridge;
+      if !p.is_null() {
+        drop(unsafe { Box::from_raw(p) });
+      }
+    },
+    || (),
+  )
+}
+
+/// `Object.defineProperty(obj, key, {value, writable, enumerable,
+/// configurable})` with the flags taken from a V8 `PropertyAttribute`.
+unsafe fn define_data_property(
+  ctx: JSContextRef,
+  obj: JSValueRef,
+  key: JSValueRef,
+  value: JSValueRef,
+  attr: u32,
+) -> Result<JSValueRef, JSValueRef> {
+  unsafe {
+    let args = [
+      obj,
+      key,
+      value,
+      JSValueMakeBoolean(ctx, attr & ATTR_READ_ONLY == 0),
+      JSValueMakeBoolean(ctx, attr & ATTR_DONT_ENUM == 0),
+      JSValueMakeBoolean(ctx, attr & ATTR_DONT_DELETE == 0),
+    ];
+    crate::jsc::core::call_js_fn(
+      ctx,
+      c"(function(o,k,v,w,e,c){Object.defineProperty(o,k,\
+         {value:v,writable:w,enumerable:e,configurable:c})})",
+      &args,
+    )
+  }
+}
+
+/// Hands a pending exception left by an embedder callback to JSC.
+unsafe fn take_callback_exception(
+  iso: *mut RealIsolate,
+  out_exc: *mut JSValueRef,
+) -> bool {
+  let pending = crate::jsc::core::peek_pending_exception(iso);
+  if pending.is_null() {
+    return false;
+  }
+  if !out_exc.is_null() {
+    unsafe { *out_exc = pending };
+  }
+  crate::jsc::core::clear_pending_exception(iso);
+  true
+}
+
+unsafe extern "C" fn native_trampoline(
+  ctx: JSContextRef,
+  function: JSObjectRef,
+  this_object: JSObjectRef,
+  argc: usize,
+  argv: *const JSValueRef,
+  exception: *mut JSValueRef,
+) -> JSValueRef {
+  crate::jsc::core::ffi_guard(
+    || unsafe {
+      let undefined = JSValueMakeUndefined(ctx);
+      let bridge = JSObjectGetPrivate(function) as *const NativeBridge;
+      if bridge.is_null() {
+        return undefined;
+      }
+      let bridge = &*bridge;
+      let n = bridge.native;
+      let holder = if this_object.is_null() {
+        undefined
+      } else {
+        this_object as JSValueRef
+      };
+      let iso = current_iso();
+      let data = if n.data.is_null() { undefined } else { n.data };
+      let key = intern_ctx::<crate::Name>(ctx, n.key);
+      let Some(key) = std::ptr::NonNull::new(key as *mut crate::Name) else {
+        return undefined;
+      };
+      if bridge.is_setter {
+        let value = if argc > 0 { *argv } else { undefined };
+        match n.setter {
+          Some(setter) => {
+            crate::jsc::core::clear_pending_exception(iso);
+            let mut info = PropCbInfo {
+              isolate: iso,
+              ctx,
+              holder,
+              data,
+              return_slot: ptr::null(),
+            };
+            let value = intern_ctx::<Value>(ctx, value);
+            if let Some(value) = std::ptr::NonNull::new(value as *mut Value) {
+              setter(
+                crate::SealedLocal(key),
+                crate::SealedLocal(value),
+                &mut info as *mut PropCbInfo
+                  as *const crate::PropertyCallbackInfo<()>,
+              );
+            }
+            take_callback_exception(iso, exception);
+          }
+          None if n.attr & ATTR_READ_ONLY == 0 && !this_object.is_null() => {
+            if let Err(exc) =
+              define_data_property(ctx, holder, n.key, value, n.attr)
+              && !exception.is_null()
+            {
+              *exception = exc;
+            }
+          }
+          None => {}
+        }
+        return undefined;
+      }
+
+      crate::jsc::core::clear_pending_exception(iso);
+      let mut info = PropCbInfo {
+        isolate: iso,
+        ctx,
+        holder,
+        data,
+        return_slot: ptr::null(),
+      };
+      (n.getter)(
+        crate::SealedLocal(key),
+        &mut info as *mut PropCbInfo
+          as *const crate::PropertyCallbackInfo<Value>,
+      );
+      if take_callback_exception(iso, exception) {
+        return undefined;
+      }
+      let ret = if info.return_slot.is_null() {
+        undefined
+      } else {
+        info.return_slot
+      };
+      if n.lazy
+        && !this_object.is_null()
+        && let Err(exc) = define_data_property(ctx, holder, n.key, ret, n.attr)
+      {
+        if !exception.is_null() {
+          *exception = exc;
+        }
+        return undefined;
+      }
+      ret
+    },
+    || unsafe { panic_to_exception(ctx, exception) },
+  )
+}
+
+/// Installs `n` on `obj` as an accessor pair. Returns false if JS refused the
+/// definition (for example on a non-extensible object).
+fn install_native(
+  ctx: JSContextRef,
+  obj: JSObjectRef,
+  n: &TemplNative,
+) -> bool {
+  if ctx.is_null() || obj.is_null() || n.key.is_null() {
+    return false;
+  }
+  unsafe {
+    let gctx = JSContextGetGlobalContext(ctx);
+    JSValueProtect(gctx, n.key);
+    if !n.data.is_null() {
+      JSValueProtect(gctx, n.data);
+    }
+    let make = |is_setter: bool| {
+      let bridge = Box::new(NativeBridge {
+        native: *n,
+        is_setter,
+      });
+      let f =
+        JSObjectMake(ctx, native_class(), Box::into_raw(bridge) as *mut c_void);
+      let fp = function_prototype(ctx);
+      if !fp.is_null() {
+        JSObjectSetPrototype(ctx, f, fp);
+      }
+      f as JSValueRef
+    };
+    let getter = make(false);
+    let setter = make(true);
+    // Lazy properties and setter-less ones redefine themselves as data
+    // properties, which needs the accessor to stay configurable.
+    let configurable =
+      n.lazy || n.setter.is_none() || n.attr & ATTR_DONT_DELETE == 0;
+    let args = [
+      obj as JSValueRef,
+      n.key,
+      getter,
+      setter,
+      JSValueMakeBoolean(ctx, n.attr & ATTR_DONT_ENUM == 0),
+      JSValueMakeBoolean(ctx, configurable),
+    ];
+    crate::jsc::core::call_js_fn(
+      ctx,
+      c"(function(o,k,g,s,e,c){Object.defineProperty(o,k,\
+         {get:g,set:s,enumerable:e,configurable:c})})",
+      &args,
+    )
+    .is_ok()
+  }
+}
+
+fn apply_natives(ctx: JSContextRef, obj: JSObjectRef, natives: &[TemplNative]) {
+  for n in natives {
+    install_native(ctx, obj, n);
+  }
+}
+
+/// The `data` a native accessor reports: `undefined` when none was given, as
+/// `PropertyCallbackArguments::data` requires a value.
+fn native_data(data_or_null: *const Value) -> JSValueRef {
+  if !data_or_null.is_null() {
+    return jsval(data_or_null);
+  }
+  let ctx = crate::jsc::core::ensure_ctx(current_iso());
+  if ctx.is_null() {
+    return ptr::null();
+  }
+  unsafe { JSValueMakeUndefined(ctx) }
+}
+
+fn push_template_native(this: *const c_void, native: TemplNative) {
+  if this.is_null() || native.key.is_null() {
+    return;
+  }
+  let p = this as usize;
+  match TEMPLATES.with(|t| t.borrow().get(&p).copied()) {
+    Some(TemplKind::Func) => {
+      unsafe { &mut *(p as *mut FnTemplate) }.natives.push(native)
+    }
+    Some(TemplKind::Obj) => unsafe { &mut *(p as *mut ObjTemplate) }
+      .natives
+      .push(native),
+    Some(TemplKind::Dict) | None => {}
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Template__SetNativeDataProperty(
+  this: *const crate::Template,
+  key: *const Name,
+  getter: crate::AccessorNameGetterCallback,
+  setter: Option<crate::AccessorNameSetterCallback>,
+  data_or_null: *const Value,
+  attr: PropertyAttribute,
+) {
+  push_template_native(
+    this as *const c_void,
+    TemplNative {
+      key: jsval(key),
+      getter,
+      setter,
+      data: native_data(data_or_null),
+      attr: attr.as_u32_lenient(),
+      lazy: false,
+    },
+  );
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Template__SetLazyDataProperty(
+  this: *const crate::Template,
+  key: *const Name,
+  getter: crate::AccessorNameGetterCallback,
+  data_or_null: *const Value,
+  attr: PropertyAttribute,
+) {
+  push_template_native(
+    this as *const c_void,
+    TemplNative {
+      key: jsval(key),
+      getter,
+      setter: None,
+      data: native_data(data_or_null),
+      attr: attr.as_u32_lenient(),
+      lazy: true,
+    },
+  );
+}
+
+/// Installs a native data property directly on an object, for
+/// `Object::SetNativeDataProperty` (rusty_v8's `set_accessor`).
+pub(crate) fn object_set_native(
+  context: *const Context,
+  obj: *const Object,
+  key: *const Name,
+  getter: crate::AccessorNameGetterCallback,
+  setter: Option<crate::AccessorNameSetterCallback>,
+  data_or_null: *const Value,
+  attr: PropertyAttribute,
+) -> bool {
+  object_install_native(
+    context,
+    obj,
+    TemplNative {
+      key: jsval(key),
+      getter,
+      setter,
+      data: native_data(data_or_null),
+      attr: attr.as_u32_lenient(),
+      lazy: false,
+    },
+  )
+}
+
+/// Installs a lazy data property directly on an object, for
+/// `Object::SetLazyDataProperty`.
+pub(crate) fn object_set_lazy(
+  context: *const Context,
+  obj: *const Object,
+  key: *const Name,
+  getter: crate::AccessorNameGetterCallback,
+  data_or_null: *const Value,
+  attr: PropertyAttribute,
+) -> bool {
+  object_install_native(
+    context,
+    obj,
+    TemplNative {
+      key: jsval(key),
+      getter,
+      setter: None,
+      data: native_data(data_or_null),
+      attr: attr.as_u32_lenient(),
+      lazy: true,
+    },
+  )
+}
+
+fn object_install_native(
+  context: *const Context,
+  obj: *const Object,
+  native: TemplNative,
+) -> bool {
+  let ctx = ctx_of(context) as JSContextRef;
+  if ctx.is_null() || obj.is_null() {
+    return false;
+  }
+  let o = jsval(obj);
+  if !unsafe { JSValueIsObject(ctx, o) } {
+    return false;
+  }
+  install_native(ctx, o as JSObjectRef, &native)
+}
+
+// ---------------------------------------------------------------------------
+// DictionaryTemplate: a fixed list of property names, instantiated with one
+// value per name (a missing value leaves the property out).
+// ---------------------------------------------------------------------------
+
+struct DictTemplate {
+  names: Vec<std::ffi::CString>,
+}
+
+pub(crate) fn is_dictionary_template(p: *const c_void) -> bool {
+  !p.is_null()
+    && matches!(
+      TEMPLATES.with(|t| t.borrow().get(&(p as usize)).copied()),
+      Some(TemplKind::Dict)
+    )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__DictionaryTemplate__New(
+  _isolate: *mut RealIsolate,
+  names: *const *const c_char,
+  name_lengths: *const usize,
+  names_len: usize,
+) -> *const c_void {
+  let mut out = Vec::with_capacity(names_len);
+  for i in 0..names_len {
+    let bytes = unsafe {
+      std::slice::from_raw_parts(
+        *names.add(i) as *const u8,
+        *name_lengths.add(i),
+      )
+    };
+    // An interior NUL cannot be a JS property name passed through the C API;
+    // V8 only accepts ASCII names here anyway.
+    out.push(std::ffi::CString::new(bytes).unwrap_or_default());
+  }
+  let t = Box::into_raw(Box::new(DictTemplate { names: out }));
+  register_template(t as usize, TemplKind::Dict);
+  t as *const c_void
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__DictionaryTemplate__NewInstance(
+  this: *const c_void,
+  context: *const Context,
+  values: *const *const Value,
+  values_len: usize,
+) -> *const Object {
+  let ctx = ctx_of(context) as JSContextRef;
+  if ctx.is_null() || !is_dictionary_template(this) {
+    return ptr::null();
+  }
+  let t = unsafe { &*(this as *const DictTemplate) };
+  let obj = unsafe { JSObjectMake(ctx, ptr::null_mut(), ptr::null_mut()) };
+  for (i, name) in t.names.iter().enumerate().take(values_len) {
+    let v = unsafe { *values.add(i) };
+    if v.is_null() {
+      continue;
+    }
+    unsafe {
+      let key = JSStringCreateWithUTF8CString(name.as_ptr());
+      let mut exc: JSValueRef = ptr::null();
+      JSObjectSetProperty(ctx, obj, key, jsval(v), 0, &mut exc);
+      JSStringRelease(key);
+    }
+  }
+  intern_ctx::<Object>(ctx, obj as JSValueRef)
+}
+
+// ---------------------------------------------------------------------------
+// FunctionTemplate::HasInstance
+// ---------------------------------------------------------------------------
+
+/// Whether `v` was created from `tmpl` or a template that inherits from it.
+///
+/// V8 answers from the object's map, which records the constructor's
+/// template. JSC objects carry no such link, so this goes by the prototype
+/// both construction paths give an instance: `new F()` and
+/// `InstanceTemplate()->NewInstance()` set it to the template's cached
+/// prototype object. An object whose prototype JS code set to that object by
+/// hand is therefore also reported as an instance.
+pub(crate) fn template_has_instance(
+  ctx: JSContextRef,
+  tmpl: *const FunctionTemplate,
+  v: JSValueRef,
+) -> bool {
+  if ctx.is_null() || tmpl.is_null() || v.is_null() {
+    return false;
+  }
+  if !unsafe { JSValueIsObject(ctx, v) } {
+    return false;
+  }
+  let proto = unsafe { JSObjectGetPrototype(ctx, v as JSObjectRef) };
+  if proto.is_null() {
+    return false;
+  }
+  let target = tmpl as *const FnTemplate;
+  TEMPLATES.with(|t| {
+    t.borrow().iter().any(|(&p, kind)| {
+      if !matches!(kind, TemplKind::Func) {
+        return false;
+      }
+      let f = unsafe { &*(p as *const FnTemplate) };
+      if f.cached_proto.is_null() || f.cached_proto != proto {
+        return false;
+      }
+      // `f` built this object's prototype; it counts if `f` is `tmpl` or
+      // inherits from it.
+      let mut cur = p as *const FnTemplate;
+      while !cur.is_null() {
+        if cur == target {
+          return true;
+        }
+        cur = unsafe { (*cur).parent };
+      }
+      false
+    })
+  })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__FunctionTemplate__HasInstance(
+  this: *const FunctionTemplate,
+  object: *const Value,
+) -> bool {
+  let ctx = current_ctx();
+  template_has_instance(ctx, this, jsval(object))
+}
+
 trait AttrU32 {
   fn as_u32_lenient(&self) -> u32;
 }
@@ -891,6 +1461,7 @@ thread_local! {
 enum TemplKind {
   Func,
   Obj,
+  Dict,
 }
 
 fn register_template(p: usize, kind: TemplKind) {
@@ -920,7 +1491,7 @@ fn with_template_props(
       let t = unsafe { &mut *(p as *mut ObjTemplate) };
       f(&mut t.props);
     }
-    None => {}
+    Some(TemplKind::Dict) | None => {}
   }
 }
 
@@ -950,6 +1521,7 @@ pub extern "C" fn v8__FunctionTemplate__New(
     props: Vec::new(),
     accessors: Vec::new(),
     call_handler: None,
+    natives: Vec::new(),
     parent_fn: ptr::null(),
   }));
   let instance = Box::into_raw(Box::new(ObjTemplate {
@@ -957,6 +1529,7 @@ pub extern "C" fn v8__FunctionTemplate__New(
     props: Vec::new(),
     accessors: Vec::new(),
     call_handler: None,
+    natives: Vec::new(),
     parent_fn: ptr::null(),
   }));
   register_template(proto as usize, TemplKind::Obj);
@@ -972,6 +1545,7 @@ pub extern "C" fn v8__FunctionTemplate__New(
     props: Vec::new(),
     constructable,
     cached_proto: ptr::null(),
+    natives: Vec::new(),
   }));
 
   unsafe { (*instance).parent_fn = t };
@@ -1009,6 +1583,7 @@ pub extern "C" fn v8__FunctionTemplate__GetFunction(
   }
 
   apply_props(ctx, f, &t.props);
+  apply_natives(ctx, f, &t.natives);
 
   if t.constructable {
     let proto_obj =
@@ -1038,6 +1613,7 @@ unsafe fn build_prototype_object(
     apply_props(ctx, proto_obj, &proto.props);
   }
   apply_accessors(ctx, proto_obj, &proto.accessors);
+  apply_natives(ctx, proto_obj, &proto.natives);
 
   if !t.parent.is_null() {
     let parent_proto = unsafe { build_prototype_object(ctx, t.parent) };
@@ -1097,7 +1673,7 @@ fn materialize_template_value(
       );
       if o.is_null() { value } else { jsval(o) }
     }
-    None => value,
+    Some(TemplKind::Dict) | None => value,
   }
 }
 
@@ -1177,6 +1753,7 @@ pub extern "C" fn v8__ObjectTemplate__New(
     props: Vec::new(),
     accessors: Vec::new(),
     call_handler: None,
+    natives: Vec::new(),
     parent_fn: ptr::null(),
   }));
   register_template(t as usize, TemplKind::Obj);
@@ -1217,6 +1794,7 @@ pub extern "C" fn v8__ObjectTemplate__NewInstance(
 
     apply_props(ctx, obj, &t.props);
     apply_accessors(ctx, obj, &t.accessors);
+    apply_natives(ctx, obj, &t.natives);
   }
   intern_ctx::<Object>(ctx, obj as JSValueRef)
 }
@@ -1412,25 +1990,39 @@ pub extern "C" fn v8__FunctionCallbackInfo__NewTarget(
   (unsafe { JSValueMakeUndefined(info.ctx) }) as *const Value
 }
 
+#[inline]
+fn prop_cbinfo<'a>(this: *const c_void) -> Option<&'a mut PropCbInfo> {
+  unsafe { (this as *mut PropCbInfo).as_mut() }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__PropertyCallbackInfo__GetIsolate(
-  _this: *const c_void,
+  this: *const c_void,
 ) -> *mut RealIsolate {
-  crate::jsc::core::current_iso()
+  match prop_cbinfo(this) {
+    Some(info) if !info.isolate.is_null() => info.isolate,
+    _ => crate::jsc::core::current_iso(),
+  }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__PropertyCallbackInfo__GetReturnValue(
-  _this: *const c_void,
+  this: *const c_void,
 ) -> usize {
-  0
+  match prop_cbinfo(this) {
+    Some(info) => (&mut info.return_slot as *mut JSValueRef) as usize,
+    None => 0,
+  }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__PropertyCallbackInfo__Holder(
-  _this: *const c_void,
+  this: *const c_void,
 ) -> *const Object {
-  ptr::null()
+  match prop_cbinfo(this) {
+    Some(info) => intern_ctx::<Object>(info.ctx, info.holder),
+    None => ptr::null(),
+  }
 }
 
 #[unsafe(no_mangle)]
@@ -1528,20 +2120,31 @@ pub extern "C" fn v8__ObjectTemplate__SetImmutableProto(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__ObjectTemplate__SetNativeDataProperty(
-  _this: *const std::os::raw::c_void,
-  _key: *const std::os::raw::c_void,
-  _getter: *const std::os::raw::c_void,
-  _setter: *const std::os::raw::c_void,
-  _data_or_null: *const std::os::raw::c_void,
-  _attr: crate::PropertyAttribute,
+  this: *const ObjectTemplate,
+  key: *const Name,
+  getter: crate::AccessorNameGetterCallback,
+  setter: Option<crate::AccessorNameSetterCallback>,
+  data_or_null: *const Value,
+  attr: PropertyAttribute,
 ) {
+  v8__Template__SetNativeDataProperty(
+    this as *const crate::Template,
+    key,
+    getter,
+    setter,
+    data_or_null,
+    attr,
+  );
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__PropertyCallbackInfo__Data(
-  _this: *const std::os::raw::c_void,
-) -> *const std::os::raw::c_void {
-  std::ptr::null()
+  this: *const c_void,
+) -> *const Value {
+  match prop_cbinfo(this) {
+    Some(info) => intern_ctx::<Value>(info.ctx, info.data),
+    None => ptr::null(),
+  }
 }
 
 #[unsafe(no_mangle)]

@@ -67,6 +67,8 @@ mod handle;
 pub mod icu;
 #[path = "../vendor/rusty_v8/src/isolate.rs"]
 mod isolate;
+#[path = "../vendor/rusty_v8/src/isolate_group.rs"]
+mod isolate_group;
 #[path = "../vendor/rusty_v8/src/isolate_create_params.rs"]
 mod isolate_create_params;
 #[path = "../vendor/rusty_v8/src/locker.rs"]
@@ -182,6 +184,7 @@ pub use handle::Local;
 pub use handle::SealedLocal;
 pub use handle::TracedReference;
 pub use handle::Weak;
+pub use isolate::ContextDependants;
 pub use isolate::GarbageCollectionType;
 pub use isolate::HeapCodeStatistics;
 pub use isolate::HeapSpaceStatistics;
@@ -198,6 +201,8 @@ pub use isolate::MemoryPressureLevel;
 pub use isolate::MessageCallback;
 pub use isolate::MessageErrorLevel;
 pub use isolate::MicrotasksPolicy;
+pub use isolate::ModifyCodeGenerationFromStringsCallback;
+pub use isolate::ModifyCodeGenerationFromStringsResult;
 pub use isolate::ModuleImportPhase;
 pub use isolate::NearHeapLimitCallback;
 pub use isolate::OomDetails;
@@ -211,6 +216,7 @@ pub use isolate::TimeZoneDetection;
 pub use isolate::UseCounterCallback;
 pub use isolate::UseCounterFeature;
 pub use isolate::WasmAsyncSuccess;
+pub use isolate_group::IsolateGroup;
 pub use isolate_create_params::CreateParams;
 pub use locker::Locker;
 pub use locker::SharedIsolate;
@@ -234,6 +240,7 @@ pub use property_filter::*;
 pub use property_handler_flags::*;
 pub use regexp::RegExpCreationFlags;
 pub use scope::AllowJavascriptExecutionScope;
+pub use scope::allow_scopes_of_another_isolate;
 
 pub use scope::CallbackScope;
 pub use scope::ContextScope;

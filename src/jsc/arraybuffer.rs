@@ -75,11 +75,19 @@ fn is_marked_detached(ctx: JSContextRef, obj: JSObjectRef) -> bool {
   }
 }
 
+/// `v8::ArrayBuffer::kMaxByteLength` (2^53 - 1 on 64-bit targets).
+const MAX_BYTE_LENGTH: usize = crate::binding::v8__TypedArray__kMaxByteLength;
+
 struct BsInner {
   refcount: AtomicUsize,
   data: *mut c_void,
   byte_length: usize,
   is_shared: bool,
+
+  /// The length the store may grow to. Equal to `byte_length` unless the
+  /// store is resizable, in which case `data` already spans this many bytes.
+  max_byte_length: usize,
+  resizable: bool,
 
   deleter: BackingStoreDeleterCallback,
   deleter_data: *mut c_void,
@@ -114,6 +122,8 @@ impl BsInner {
       data,
       byte_length,
       is_shared,
+      max_byte_length: byte_length,
+      resizable: false,
       deleter,
       deleter_data,
       owns_malloc,
@@ -125,6 +135,42 @@ impl BsInner {
       ptr::null_mut()
     } else {
       unsafe { calloc(byte_length, 1) }
+    };
+    BsInner::boxed(
+      data,
+      byte_length,
+      is_shared,
+      noop_deleter,
+      ptr::null_mut(),
+      true,
+    )
+  }
+
+  /// Allocates a store per `BackingStoreInitializationMode`. Returns null if
+  /// the length exceeds what an ArrayBuffer may hold or allocation fails.
+  fn try_allocate(
+    byte_length: usize,
+    is_shared: bool,
+    mode: crate::BackingStoreInitializationMode,
+  ) -> *mut BsInner {
+    if byte_length > MAX_BYTE_LENGTH {
+      return ptr::null_mut();
+    }
+    let data = if byte_length == 0 {
+      ptr::null_mut()
+    } else {
+      let p = match mode {
+        crate::BackingStoreInitializationMode::ZeroInitialized => unsafe {
+          calloc(byte_length, 1)
+        },
+        crate::BackingStoreInitializationMode::Uninitialized => unsafe {
+          malloc(byte_length)
+        },
+      };
+      if p.is_null() {
+        return ptr::null_mut();
+      }
+      p
     };
     BsInner::boxed(
       data,
@@ -205,7 +251,69 @@ fn backing_store_for_buffer(
   };
   let inner =
     BsInner::boxed(data, len, false, noop_deleter, ptr::null_mut(), false);
+  if let Some(max) = buffer_max_byte_length(ctx, buf) {
+    unsafe {
+      (*inner).resizable = true;
+      (*inner).max_byte_length = max;
+    }
+  }
   make_shared_ref(inner)
+}
+
+/// `maxByteLength` of a resizable ArrayBuffer or growable SharedArrayBuffer,
+/// or `None` for a fixed-length one.
+fn buffer_max_byte_length(ctx: JSContextRef, buf: JSValueRef) -> Option<usize> {
+  let r = unsafe {
+    crate::jsc::core::call_js_fn(
+      ctx,
+      c"(function(b){try{return b.resizable===true||b.growable===true?\
+         b.maxByteLength:-1}catch(e){return -1}})",
+      &[buf],
+    )
+  }
+  .ok()?;
+  let n = unsafe { JSValueToNumber(ctx, r, ptr::null_mut()) };
+  if n >= 0.0 { Some(n as usize) } else { None }
+}
+
+/// `new ArrayBuffer(len, {maxByteLength: max})` holding a copy of `data`.
+///
+/// JSC's C API can only wrap foreign memory in a fixed-length buffer, so a
+/// resizable backing store cannot be shared with the ArrayBuffer made from it
+/// the way V8 shares it. The buffer starts out with the store's contents,
+/// but later writes on either side are not seen by the other.
+fn make_resizable_buffer_copy(
+  ctx: JSContextRef,
+  data: *const c_void,
+  len: usize,
+  max: usize,
+) -> JSValueRef {
+  let args = unsafe {
+    [
+      JSValueMakeNumber(ctx, len as f64),
+      JSValueMakeNumber(ctx, max as f64),
+    ]
+  };
+  let Ok(buf) = (unsafe {
+    crate::jsc::core::call_js_fn(
+      ctx,
+      c"(function(l,m){return new ArrayBuffer(l,{maxByteLength:m})})",
+      &args,
+    )
+  }) else {
+    return ptr::null();
+  };
+  if len > 0 && !data.is_null() {
+    let dst = unsafe {
+      JSObjectGetArrayBufferBytesPtr(ctx, buf as JSObjectRef, ptr::null_mut())
+    };
+    if !dst.is_null() {
+      unsafe {
+        ptr::copy_nonoverlapping(data as *const u8, dst as *mut u8, len)
+      };
+    }
+  }
+  buf
 }
 
 #[unsafe(no_mangle)]
@@ -259,6 +367,14 @@ pub extern "C" fn v8__ArrayBuffer__New__with_backing_store(
     return ptr::null();
   }
   let (data, len) = unsafe { ((*inner).data, (*inner).byte_length) };
+  if unsafe { (*inner).resizable } {
+    let max = unsafe { (*inner).max_byte_length };
+    let buf = make_resizable_buffer_copy(ctx, data, len, max);
+    if buf.is_null() {
+      return ptr::null();
+    }
+    return intern_ctx::<ArrayBuffer>(ctx, buf);
+  }
 
   unsafe { (*inner).refcount.fetch_add(1, Ordering::SeqCst) };
   unsafe extern "C" fn dealloc(_bytes: *mut c_void, ctx: *mut c_void) {
@@ -459,7 +575,176 @@ pub extern "C" fn v8__BackingStore__IsShared(
 pub extern "C" fn v8__BackingStore__IsResizableByUserJavaScript(
   this: *const BackingStore,
 ) -> bool {
-  false
+  bs_inner(this).is_some_and(|b| b.resizable)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__BackingStore__MaxByteLength(
+  this: *const BackingStore,
+) -> usize {
+  bs_inner(this).map_or(0, |b| b.max_byte_length)
+}
+
+/// V8's `kOutOfMemory` failure mode: a failed allocation is fatal.
+fn backing_store_oom(byte_length: usize) -> ! {
+  panic!(
+    "v8x: out of memory allocating an ArrayBuffer backing store of \
+     {byte_length} bytes"
+  )
+}
+
+fn new_backing_store_with_mode(
+  byte_length: usize,
+  is_shared: bool,
+  initialization_mode: crate::BackingStoreInitializationMode,
+  on_failure: crate::BackingStoreOnFailureMode,
+) -> *mut BackingStore {
+  let inner =
+    BsInner::try_allocate(byte_length, is_shared, initialization_mode);
+  if inner.is_null()
+    && matches!(on_failure, crate::BackingStoreOnFailureMode::OutOfMemory)
+  {
+    backing_store_oom(byte_length);
+  }
+  inner as *mut BackingStore
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ArrayBuffer__NewBackingStore__with_mode(
+  _isolate: *mut RealIsolate,
+  byte_length: usize,
+  initialization_mode: crate::BackingStoreInitializationMode,
+  on_failure: crate::BackingStoreOnFailureMode,
+) -> *mut BackingStore {
+  new_backing_store_with_mode(
+    byte_length,
+    false,
+    initialization_mode,
+    on_failure,
+  )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__SharedArrayBuffer__NewBackingStore__with_mode(
+  _isolate: *mut RealIsolate,
+  byte_length: usize,
+  initialization_mode: crate::BackingStoreInitializationMode,
+  on_failure: crate::BackingStoreOnFailureMode,
+) -> *mut BackingStore {
+  new_backing_store_with_mode(
+    byte_length,
+    true,
+    initialization_mode,
+    on_failure,
+  )
+}
+
+/// A zero-filled store that reserves `max_byte_length` bytes up front, as
+/// V8's does, so growing it never moves the data.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ArrayBuffer__NewResizableBackingStore(
+  byte_length: usize,
+  max_byte_length: usize,
+) -> *mut BackingStore {
+  assert!(
+    byte_length <= max_byte_length && max_byte_length <= MAX_BYTE_LENGTH,
+    "v8x: invalid resizable backing store length {byte_length} / maximum \
+     {max_byte_length}"
+  );
+  let data = unsafe { calloc(max_byte_length.max(1), 1) };
+  if data.is_null() {
+    backing_store_oom(max_byte_length);
+  }
+  let inner = BsInner::boxed(
+    data,
+    byte_length,
+    false,
+    noop_deleter,
+    ptr::null_mut(),
+    true,
+  );
+  unsafe {
+    (*inner).resizable = true;
+    (*inner).max_byte_length = max_byte_length;
+  }
+  inner as *mut BackingStore
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ArrayBuffer__MaybeNew(
+  isolate: *mut RealIsolate,
+  byte_length: usize,
+  initialization_mode: crate::BackingStoreInitializationMode,
+) -> *const ArrayBuffer {
+  let st = iso_state(isolate);
+  let ctx =
+    st.contexts.last().copied().unwrap_or(ptr::null_mut()) as JSContextRef;
+  if ctx.is_null() || byte_length > MAX_BYTE_LENGTH {
+    return ptr::null();
+  }
+  // As in `New__with_byte_length`, never hand JSC a null data pointer.
+  let data = match initialization_mode {
+    crate::BackingStoreInitializationMode::ZeroInitialized => unsafe {
+      calloc(byte_length.max(1), 1)
+    },
+    crate::BackingStoreInitializationMode::Uninitialized => unsafe {
+      malloc(byte_length.max(1))
+    },
+  };
+  if data.is_null() {
+    return ptr::null();
+  }
+  unsafe extern "C" fn dealloc(bytes: *mut c_void, _ctx: *mut c_void) {
+    if !bytes.is_null() {
+      unsafe { free(bytes) };
+    }
+  }
+  let obj = unsafe {
+    JSObjectMakeArrayBufferWithBytesNoCopy(
+      ctx,
+      data,
+      byte_length,
+      Some(dealloc),
+      ptr::null_mut(),
+      ptr::null_mut(),
+    )
+  };
+  if obj.is_null() {
+    unsafe { free(data) };
+    return ptr::null();
+  }
+  intern_ctx::<ArrayBuffer>(ctx, obj as JSValueRef)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ArrayBuffer__IsResizableByUserJavaScript(
+  this: *const ArrayBuffer,
+) -> bool {
+  let ctx = current_ctx();
+  if ctx.is_null() || this.is_null() {
+    return false;
+  }
+  buffer_max_byte_length(ctx, jsval(this)).is_some()
+}
+
+/// Immutable ArrayBuffers (the TC39 proposal) report `immutable === true`;
+/// JavaScriptCore builds without the proposal never create one.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ArrayBuffer__IsImmutable(
+  this: *const ArrayBuffer,
+) -> bool {
+  let ctx = current_ctx();
+  if ctx.is_null() || this.is_null() {
+    return false;
+  }
+  let r = unsafe {
+    crate::jsc::core::call_js_fn(
+      ctx,
+      c"(function(b){try{return b.immutable===true}catch(e){return false}})",
+      &[jsval(this)],
+    )
+  };
+  matches!(r, Ok(v) if unsafe { JSValueToBoolean(ctx, v) })
 }
 
 #[unsafe(no_mangle)]
@@ -534,6 +819,15 @@ pub extern "C" fn std__shared_ptr__v8__BackingStore__use_count(
 pub extern "C" fn v8__ArrayBuffer__Allocator__NewDefaultAllocator()
 -> *mut Allocator {
   Box::into_raw(Box::new(0u8)) as *mut Allocator
+}
+
+/// V8 only has a group-scoped allocator with multi-cage pointer compression,
+/// and returns null otherwise. This backend has a single isolate group.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ArrayBuffer__Allocator__NewDefaultAllocator__with_group(
+  _group: *const c_void,
+) -> *mut Allocator {
+  ptr::null_mut()
 }
 
 #[unsafe(no_mangle)]
@@ -957,6 +1251,119 @@ typed_array_new!(
   kJSTypedArrayTypeBigUint64Array
 );
 
+// Views over a SharedArrayBuffer. JSC's typed array constructors take either
+// kind of buffer, so these share `make_typed_array` with the ArrayBuffer
+// versions.
+macro_rules! typed_array_new_shared {
+  ($fn_name:ident, $ty_name:ident, $jsc_ty:expr) => {
+    #[unsafe(no_mangle)]
+    pub extern "C" fn $fn_name(
+      buf_ptr: *const SharedArrayBuffer,
+      byte_offset: usize,
+      length: usize,
+    ) -> *const crate::$ty_name {
+      let v = make_typed_array(
+        buf_ptr as *const ArrayBuffer,
+        byte_offset,
+        length,
+        $jsc_ty,
+      );
+      intern::<crate::$ty_name>(v)
+    }
+  };
+}
+
+typed_array_new_shared!(
+  v8__Uint8Array__New__with_shared_buffer,
+  Uint8Array,
+  kJSTypedArrayTypeUint8Array
+);
+typed_array_new_shared!(
+  v8__Uint8ClampedArray__New__with_shared_buffer,
+  Uint8ClampedArray,
+  kJSTypedArrayTypeUint8ClampedArray
+);
+typed_array_new_shared!(
+  v8__Int8Array__New__with_shared_buffer,
+  Int8Array,
+  kJSTypedArrayTypeInt8Array
+);
+typed_array_new_shared!(
+  v8__Uint16Array__New__with_shared_buffer,
+  Uint16Array,
+  kJSTypedArrayTypeUint16Array
+);
+typed_array_new_shared!(
+  v8__Int16Array__New__with_shared_buffer,
+  Int16Array,
+  kJSTypedArrayTypeInt16Array
+);
+typed_array_new_shared!(
+  v8__Uint32Array__New__with_shared_buffer,
+  Uint32Array,
+  kJSTypedArrayTypeUint32Array
+);
+typed_array_new_shared!(
+  v8__Int32Array__New__with_shared_buffer,
+  Int32Array,
+  kJSTypedArrayTypeInt32Array
+);
+typed_array_new_shared!(
+  v8__Float32Array__New__with_shared_buffer,
+  Float32Array,
+  kJSTypedArrayTypeFloat32Array
+);
+typed_array_new_shared!(
+  v8__Float64Array__New__with_shared_buffer,
+  Float64Array,
+  kJSTypedArrayTypeFloat64Array
+);
+typed_array_new_shared!(
+  v8__BigInt64Array__New__with_shared_buffer,
+  BigInt64Array,
+  kJSTypedArrayTypeBigInt64Array
+);
+typed_array_new_shared!(
+  v8__BigUint64Array__New__with_shared_buffer,
+  BigUint64Array,
+  kJSTypedArrayTypeBigUint64Array
+);
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Float16Array__New__with_shared_buffer(
+  buf_ptr: *const SharedArrayBuffer,
+  byte_offset: usize,
+  length: usize,
+) -> *const crate::Float16Array {
+  v8__Float16Array__New(buf_ptr as *const ArrayBuffer, byte_offset, length)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__DataView__New__with_shared_buffer(
+  sab: *const SharedArrayBuffer,
+  byte_offset: usize,
+  length: usize,
+) -> *const DataView {
+  v8__DataView__New(sab as *const ArrayBuffer, byte_offset, length)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__SharedArrayBuffer__Data(
+  this: *const SharedArrayBuffer,
+) -> *mut c_void {
+  let ctx = current_ctx();
+  if ctx.is_null() || this.is_null() {
+    return ptr::null_mut();
+  }
+  unsafe {
+    JSObjectGetArrayBufferBytesPtr(
+      ctx,
+      jsval(this) as JSObjectRef,
+      ptr::null_mut(),
+    )
+  }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__ArrayBuffer__SetDetachKey(
   _this: *const ArrayBuffer,
@@ -1148,10 +1555,30 @@ pub extern "C" fn v8__SharedArrayBuffer__NewBackingStore__with_data(
   std::ptr::null_mut()
 }
 
+/// `new SharedArrayBuffer(n)`: the C API can only make plain ArrayBuffers.
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__SharedArrayBuffer__New__with_byte_length(
-  _isolate: *mut std::os::raw::c_void,
-  _byte_length: usize,
-) -> *const std::os::raw::c_void {
-  std::ptr::null()
+  isolate: *mut RealIsolate,
+  byte_length: usize,
+) -> *const SharedArrayBuffer {
+  if isolate.is_null() {
+    return ptr::null();
+  }
+  let st = iso_state(isolate);
+  let ctx =
+    st.contexts.last().copied().unwrap_or(ptr::null_mut()) as JSContextRef;
+  if ctx.is_null() {
+    return ptr::null();
+  }
+  let len = unsafe { JSValueMakeNumber(ctx, byte_length as f64) };
+  match unsafe {
+    crate::jsc::core::call_js_fn(
+      ctx,
+      c"(function(n){return new SharedArrayBuffer(n)})",
+      &[len],
+    )
+  } {
+    Ok(v) => intern_ctx::<SharedArrayBuffer>(ctx, v),
+    Err(_) => ptr::null(),
+  }
 }

@@ -493,6 +493,9 @@ struct InspectorState {
   channel: *mut RawChannel,
   context_name: String,
   context_aux_data: String,
+  /// Trust level of the session last connected on `channel`. Since V8 15.8
+  /// remote object ids handed to untrusted sessions carry isolate id 0.
+  session_trusted: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1187,23 +1190,68 @@ pub(crate) struct RemoteObjectBytes(Vec<u8>);
 
 #[unsafe(no_mangle)]
 pub extern "C" fn v8_inspector__V8InspectorSession__wrapObject(
-  _session: *mut RawV8InspectorSession,
+  session: *mut RawV8InspectorSession,
   context: *const Context,
   value: *const Value,
-  _object_group: StringView,
+  object_group: StringView,
   _generate_preview: bool,
 ) -> *mut RemoteObjectBytes {
-  // Object groups exist so `releaseObjectGroup` can drop a batch of remote
-  // references at once. This backend holds no remote references, so the group
-  // and the preview flag make no difference to what it can report.
+  // Values that are not primitives get an `objectId`, under which the session
+  // keeps them alive until their object group is released, so that
+  // `unwrapObject` can hand them back. The preview flag is not honoured: the
+  // description is all this backend reports either way.
   let ctx = crate::quickjs::core::ctx_of(context);
   if ctx.is_null() || value.is_null() {
     return std::ptr::null_mut();
   }
-  let json = unsafe {
-    console_remote_object_json(ctx, crate::quickjs::core::jsval_of(value))
-  };
+  let v = crate::quickjs::core::jsval_of(value);
+  let mut json = unsafe { console_remote_object_json(ctx, v) };
+  let by_reference = v.tag == JS_TAG_OBJECT || jsv_is_symbol(&v);
+  if by_reference && !session.is_null() && json.starts_with('{') {
+    let sess = unsafe { &mut *(session.cast::<cdp::CdpSession>()) };
+    let group = string_view_to_string(&object_group);
+    let id = sess.retain_wrapped(ctx, v, group);
+    json.insert_str(1, &format!(r#""objectId":"{id}","#));
+  }
   Box::into_raw(Box::new(RemoteObjectBytes(json.into_bytes())))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8_inspector__V8InspectorSession__unwrapObject(
+  session: *mut RawV8InspectorSession,
+  error: *mut *mut StringBuffer,
+  object_id: StringView,
+  value: *mut *const Value,
+  context: *mut *const Context,
+  object_group: *mut *mut StringBuffer,
+) -> bool {
+  let id = string_view_to_string(&object_id);
+  let found = if session.is_null() {
+    None
+  } else {
+    let sess = unsafe { &*(session.cast::<cdp::CdpSession>()) };
+    sess.unwrap(&id)
+  };
+  let Some((v, ctx, group)) = found else {
+    if !error.is_null() {
+      let units = "Invalid remote object id".encode_utf16().collect();
+      unsafe { *error = RealStringBuffer::boxed_from_utf16(units) };
+    }
+    return false;
+  };
+  unsafe {
+    if !value.is_null() {
+      *value = crate::quickjs::core::intern_dup::<Value>(ctx, v);
+    }
+    if !context.is_null() {
+      *context = crate::quickjs::core::intern_ctx(ctx);
+    }
+    if !object_group.is_null() {
+      let units = group.encode_utf16().collect();
+      *object_group = RealStringBuffer::boxed_from_utf16(units);
+    }
+  }
+  true
 }
 
 #[unsafe(no_mangle)]
@@ -1229,10 +1277,14 @@ pub extern "C" fn v8_inspector__RemoteObject__toBytes(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn v8_inspector__V8InspectorSession__releaseObjectGroup(
-  _session: *mut RawV8InspectorSession,
-  _object_group: StringView,
+  session: *mut RawV8InspectorSession,
+  object_group: StringView,
 ) {
-  // No remote references are retained, so there is nothing to release.
+  if session.is_null() {
+    return;
+  }
+  let sess = unsafe { &mut *(session.cast::<cdp::CdpSession>()) };
+  sess.release_group(&string_view_to_string(&object_group));
 }
 
 unsafe extern "C" {
@@ -1358,6 +1410,7 @@ pub extern "C" fn v8_inspector__V8Inspector__create(
     channel: std::ptr::null_mut(),
     context_name: "main realm".to_string(),
     context_aux_data: r#"{"isDefault":true,"type":"default"}"#.to_string(),
+    session_trusted: true,
   }))
   .cast::<RawV8Inspector>()
 }
@@ -1376,6 +1429,10 @@ pub extern "C" fn v8_inspector__V8Inspector__connect(
   if !inspector.is_null() {
     let state = unsafe { &mut *inspector.cast::<InspectorState>() };
     state.channel = channel;
+    state.session_trusted = matches!(
+      _client_trust_level,
+      V8InspectorClientTrustLevel::FullyTrusted
+    );
     client = state.client;
     context_name.clone_from(&state.context_name);
     context_aux_data.clone_from(&state.context_aux_data);
@@ -1517,10 +1574,11 @@ pub extern "C" fn v8_inspector__V8Inspector__exceptionThrown(
   let (description, exception_message) =
     unsafe { exception_description_and_message(_exception) };
   let json = format!(
-    "{{\"method\":\"Runtime.exceptionThrown\",\"params\":{{\"timestamp\":0,\"exceptionDetails\":{{\"exceptionId\":1,\"text\":{},\"lineNumber\":0,\"columnNumber\":0,\"scriptId\":\"1\",\"url\":{},\"exception\":{{\"type\":\"object\",\"subtype\":\"error\",\"className\":\"Error\",\"description\":{},\"objectId\":\"1.1.1\",\"preview\":{{\"type\":\"object\",\"subtype\":\"error\",\"description\":{},\"overflow\":false,\"properties\":[{{\"name\":\"stack\",\"type\":\"string\",\"value\":{}}},{{\"name\":\"message\",\"type\":\"string\",\"value\":{}}}]}}}},\"executionContextId\":1}}}}}}",
+    "{{\"method\":\"Runtime.exceptionThrown\",\"params\":{{\"timestamp\":0,\"exceptionDetails\":{{\"exceptionId\":1,\"text\":{},\"lineNumber\":0,\"columnNumber\":0,\"scriptId\":\"1\",\"url\":{},\"exception\":{{\"type\":\"object\",\"subtype\":\"error\",\"className\":\"Error\",\"description\":{},\"objectId\":\"{}.1.1\",\"preview\":{{\"type\":\"object\",\"subtype\":\"error\",\"description\":{},\"overflow\":false,\"properties\":[{{\"name\":\"stack\",\"type\":\"string\",\"value\":{}}},{{\"name\":\"message\",\"type\":\"string\",\"value\":{}}}]}}}},\"executionContextId\":1}}}}}}",
     json_string(&text),
     json_string(&url),
     json_string(&description),
+    if state.session_trusted { 1 } else { 0 },
     json_string(&description),
     json_string(&description),
     json_string(&exception_message),
@@ -1652,6 +1710,9 @@ pub(crate) mod cdp {
     debugger_enabled: bool,
 
     objects: HashMap<u64, JSValue>,
+    /// For objects handed out by `wrapObject`: the context they were wrapped
+    /// in and their object group, which `unwrapObject` reports back.
+    wrapped: HashMap<u64, (usize, String)>,
     pending_evaluations: Vec<PendingEvaluation>,
     scripts: HashMap<String, String>,
     script_ids_by_url: HashMap<String, String>,
@@ -1687,6 +1748,7 @@ pub(crate) mod cdp {
         next_script_id: 1,
         debugger_enabled: false,
         objects: HashMap::new(),
+        wrapped: HashMap::new(),
         pending_evaluations: Vec::new(),
         scripts: HashMap::new(),
         script_ids_by_url: HashMap::new(),
@@ -1789,6 +1851,47 @@ pub(crate) mod cdp {
       self.next_obj_id += 1;
       self.objects.insert(id, unsafe { JS_DupValue(ctx, v) });
       id
+    }
+
+    /// Keeps `v` reachable under a fresh remote object id, for `wrapObject`.
+    pub fn retain_wrapped(
+      &mut self,
+      ctx: *mut JSContext,
+      v: JSValue,
+      group: String,
+    ) -> u64 {
+      let id = self.retain(ctx, v);
+      self.wrapped.insert(id, (ctx as usize, group));
+      id
+    }
+
+    /// The value, context and object group behind a `wrapObject` id.
+    pub fn unwrap(
+      &self,
+      object_id: &str,
+    ) -> Option<(JSValue, *mut JSContext, String)> {
+      let id = object_id.parse::<u64>().ok()?;
+      let value = *self.objects.get(&id)?;
+      let (ctx, group) = self.wrapped.get(&id)?;
+      Some((value, *ctx as *mut JSContext, group.clone()))
+    }
+
+    /// Drops every remote object wrapped under `group`.
+    pub fn release_group(&mut self, group: &str) {
+      let ids: Vec<u64> = self
+        .wrapped
+        .iter()
+        .filter(|(_, (_, g))| g == group)
+        .map(|(&id, _)| id)
+        .collect();
+      for id in ids {
+        let Some((ctx, _)) = self.wrapped.remove(&id) else {
+          continue;
+        };
+        if let Some(v) = self.objects.remove(&id) {
+          unsafe { JS_FreeValue(ctx as *mut JSContext, v) };
+        }
+      }
     }
   }
 

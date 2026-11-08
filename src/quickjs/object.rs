@@ -1806,6 +1806,59 @@ pub extern "C" fn v8__Array__Length(array: *const Array) -> u32 {
   len as u32
 }
 
+/// `v8::Array::CallbackResult`.
+const ARRAY_ITERATE_EXCEPTION: i32 = 0;
+const ARRAY_ITERATE_BREAK: i32 = 1;
+
+type ArrayIterateCallback = unsafe extern "C" fn(
+  index: u32,
+  element: *const Value,
+  data: *mut std::ffi::c_void,
+) -> i32;
+
+/// Visits each element in index order. Holes read as `undefined`, as in V8's
+/// fast path. The element handle lives in a stack slot that is released after
+/// the callback returns: the contract forbids the callback from letting it
+/// escape, so it never needs a place in the handle scope.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Array__Iterate(
+  this: *const Array,
+  context: *const Context,
+  callback: ArrayIterateCallback,
+  callback_data: *mut std::ffi::c_void,
+) -> bool {
+  let ctx = ctx_of(context);
+  if ctx.is_null() || this.is_null() {
+    return false;
+  }
+  let array = jsval_of(this);
+  let mut len: i64 = 0;
+  if unsafe { JS_GetLength(ctx, array, &mut len) } < 0 {
+    return false;
+  }
+  for index in 0..len.max(0) as u32 {
+    let element = unsafe { JS_GetPropertyUint32(ctx, array, index) };
+    if element.tag == JS_TAG_EXCEPTION {
+      return false;
+    }
+    let slot = element;
+    let result = unsafe {
+      callback(
+        index,
+        &slot as *const JSValue as *const Value,
+        callback_data,
+      )
+    };
+    unsafe { JS_FreeValue(ctx, element) };
+    match result {
+      ARRAY_ITERATE_EXCEPTION => return false,
+      ARRAY_ITERATE_BREAK => return true,
+      _ => {}
+    }
+  }
+  true
+}
+
 thread_local! {
     static WRAP_TABLE: std::cell::RefCell<
         std::collections::HashMap<(usize, u16), usize>,
@@ -1918,6 +1971,43 @@ pub extern "C" fn v8__Object__Unwrap(
       ptr::null_mut()
     }
   })
+}
+
+pub(crate) fn is_api_wrapper_value(obj: JSValue) -> bool {
+  jsv_is_object(&obj)
+    && API_WRAPPERS.with(|t| t.borrow().contains(&value_key(obj)))
+}
+
+/// Returns the first object on `this`'s prototype chain, starting with `this`
+/// itself, that is an instance of `templ`.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Object__FindInstanceInPrototypeChain(
+  this: *const Object,
+  templ: *const crate::FunctionTemplate,
+) -> *const Object {
+  let ctx = current_ctx();
+  if ctx.is_null() || this.is_null() || templ.is_null() {
+    return ptr::null();
+  }
+  let mut current = unsafe { JS_DupValue(ctx, jsval_of(this)) };
+  // V8 bounds this walk too; a chain this deep is not a real class hierarchy.
+  for _ in 0..64 {
+    if !jsv_is_object(&current) {
+      break;
+    }
+    if super::function::template_has_instance(ctx, current, templ) {
+      return intern::<Object>(current);
+    }
+    let next = unsafe { JS_GetPrototype(ctx, current) };
+    unsafe { JS_FreeValue(ctx, current) };
+    if next.tag == JS_TAG_EXCEPTION {
+      unsafe { clear_exception(ctx) };
+      return ptr::null();
+    }
+    current = next;
+  }
+  unsafe { JS_FreeValue(ctx, current) };
+  ptr::null()
 }
 
 #[unsafe(no_mangle)]
@@ -2277,6 +2367,117 @@ pub extern "C" fn v8__RegExp__GetSource(
     }
     intern::<V8String>(source) as *const std::os::raw::c_void
   }
+}
+
+// --- RegExp backtrack limit
+//
+// libregexp has no step budget, but it polls the runtime's interrupt handler
+// every `REGEXP_STEPS_PER_POLL` backtracking steps (`lre_check_timeout`). A
+// regexp created with a limit gets an own `exec` that runs the original with a
+// budget armed; the interrupt handler spends `REGEXP_STEPS_PER_POLL` of it per
+// poll and aborts the match once it is gone. The abort surfaces as a failed
+// match (null), which is what V8 reports when the limit is hit. The limit is
+// therefore honoured to a granularity of one poll interval. Installing it as
+// `exec` means every path that runs the regexp sees it: `RegExp::Exec`, and
+// JS's `exec`, `test`, `match`, `replace` and friends, which all go through
+// `RegExpExec` and so through this property.
+
+/// libregexp's `INTERRUPT_COUNTER_INIT`.
+const REGEXP_STEPS_PER_POLL: u64 = 10_000;
+
+thread_local! {
+  /// Remaining steps of the innermost limited regexp, and whether it ran out.
+  static REGEXP_BUDGET: std::cell::Cell<Option<(u64, bool)>> =
+    const { std::cell::Cell::new(None) };
+}
+
+/// Called from the runtime's interrupt handler. Returns true when the
+/// currently armed backtrack budget is exhausted, which aborts the match.
+pub(crate) fn regexp_budget_exhausted() -> bool {
+  REGEXP_BUDGET.with(|b| match b.get() {
+    None => false,
+    Some((remaining, _)) if remaining > REGEXP_STEPS_PER_POLL => {
+      b.set(Some((remaining - REGEXP_STEPS_PER_POLL, false)));
+      false
+    }
+    Some(_) => {
+      b.set(Some((0, true)));
+      true
+    }
+  })
+}
+
+unsafe extern "C" fn limited_regexp_exec(
+  ctx: *mut JSContext,
+  this_val: JSValue,
+  argc: c_int,
+  argv: *mut JSValue,
+  _magic: c_int,
+  data: *mut JSValue,
+) -> JSValue {
+  let original = unsafe { *data };
+  let mut limit: i64 = 0;
+  unsafe { JS_ToInt64(ctx, &mut limit, *data.add(1)) };
+  let outer =
+    REGEXP_BUDGET.with(|b| b.replace(Some((limit.max(1) as u64, false))));
+  let result = unsafe { JS_Call(ctx, original, this_val, argc, argv) };
+  let hit = REGEXP_BUDGET.with(|b| {
+    let hit = matches!(b.get(), Some((_, true)));
+    b.set(outer);
+    hit
+  });
+  if hit && result.tag == JS_TAG_EXCEPTION {
+    unsafe { clear_exception(ctx) };
+    return jsv_null();
+  }
+  result
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__RegExp__MAX_BACKTRACK_LIMIT() -> u32 {
+  // V8's `kSmiMaxValue` without pointer compression.
+  i32::MAX as u32
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__RegExp__NewWithBacktrackLimit(
+  context: *const std::os::raw::c_void,
+  pattern: *const std::os::raw::c_void,
+  flags: crate::RegExpCreationFlags,
+  backtrack_limit: u32,
+) -> *const std::os::raw::c_void {
+  let regexp = v8__RegExp__New(context, pattern, flags);
+  let ctx = ctx_from_raw_context(context);
+  if regexp.is_null() || ctx.is_null() {
+    return regexp;
+  }
+  unsafe {
+    let value = jsval_of(regexp as *const Value);
+    let original = JS_GetPropertyStr(ctx, value, c"exec".as_ptr());
+    if !JS_IsFunction(ctx, original) {
+      JS_FreeValue(ctx, original);
+      clear_exception(ctx);
+      return regexp;
+    }
+    let mut data = [original, JS_NewInt64(ctx, backtrack_limit as i64)];
+    let exec =
+      JS_NewCFunctionData(ctx, limited_regexp_exec, 1, 0, 2, data.as_mut_ptr());
+    JS_FreeValue(ctx, data[0]);
+    if exec.tag == JS_TAG_EXCEPTION {
+      clear_exception(ctx);
+      return regexp;
+    }
+    let atom = JS_NewAtom(ctx, c"exec".as_ptr());
+    JS_DefinePropertyValue(
+      ctx,
+      value,
+      atom,
+      exec,
+      JS_PROP_CONFIGURABLE | JS_PROP_WRITABLE,
+    );
+    JS_FreeAtom(ctx, atom);
+  }
+  regexp
 }
 
 #[unsafe(no_mangle)]

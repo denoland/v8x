@@ -14,8 +14,8 @@
 JavaScript engine:
 
 ```diff
--v8 = "152.1.0"
-+v8 = { package = "v8x", version = "152.1.0", features = ["jsc"] }
+-v8 = "158.0.0"
++v8 = { package = "v8x", version = "158.0.0", features = ["jsc"] }
 ```
 
 Anything built on rusty_v8, including `deno_core` and Deno itself, compiles

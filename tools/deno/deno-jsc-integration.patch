@@ -12,23 +12,23 @@ index 8fb5a3a..b7753f8 100644
  
  [target.'cfg(all())']
 diff --git a/Cargo.toml b/Cargo.toml
-index 51bfbf1..2e1102f 100644
+index fd4c04d..3d03551 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -105,7 +105,7 @@ deno_task_shell = "=0.33.0"
+@@ -107,7 +107,7 @@ deno_task_shell = "=0.33.0"
  deno_terminal = "=0.2.3"
  deno_unsync = { version = "0.4.4", default-features = false }
  deno_whoami = "0.1.0"
 -v8 = { version = "149.4.0", default-features = false, features = ["simdutf"] }
 +v8 = { package = "v8x", path = "/Users/divy/gh/v8x", default-features = false, features = ["simdutf", "engine_jsc", "vendor_jsc"] }
  
- denokv_proto = "0.13.0"
- denokv_remote = "0.13.0"
+ denokv_proto = "0.14.0"
+ denokv_remote = "0.14.0"
 diff --git a/cli/args/flags.rs b/cli/args/flags.rs
-index 1a76c18..9586dcc 100644
+index 48570b0..0ba0cd4 100644
 --- a/cli/args/flags.rs
 +++ b/cli/args/flags.rs
-@@ -1484,7 +1484,7 @@ pub fn clap_root() -> Command {
+@@ -1503,7 +1503,7 @@ pub fn clap_root() -> Command {
      DENO_VERSION_INFO.release_channel.name(),
      env!("PROFILE"),
      env!("TARGET"),
@@ -38,7 +38,7 @@ index 1a76c18..9586dcc 100644
    );
  
 diff --git a/libs/core/01_core.js b/libs/core/01_core.js
-index ff6044d..4cb0afa 100755
+index 44894af..aaf3129 100755
 --- a/libs/core/01_core.js
 +++ b/libs/core/01_core.js
 @@ -13,6 +13,7 @@
@@ -49,7 +49,7 @@ index ff6044d..4cb0afa 100755
      ObjectKeys,
      ObjectHasOwn,
      setQueueMicrotask,
-@@ -917,7 +918,23 @@
+@@ -930,7 +931,23 @@
          desc[lazyNameSym] = key;
        }
      }
@@ -74,11 +74,320 @@ index ff6044d..4cb0afa 100755
    }
  
    function createLazyLoader(specifier) {
+diff --git a/libs/core/error.rs b/libs/core/error.rs
+index aafac6d..07d27f1 100644
+--- a/libs/core/error.rs
++++ b/libs/core/error.rs
+@@ -403,7 +403,7 @@ pub fn to_v8_error<'s, 'i>(
+     .borrow()
+     .clone()
+     .expect("Custom error builder must be set");
+-  let cb = cb.open(tc_scope);
++  let cb = v8::Local::new(tc_scope, &cb);
+   let this = v8::undefined(tc_scope).into();
+   let class = v8::String::new(tc_scope, &error.get_class()).unwrap();
+   let message = v8::String::new(tc_scope, &error.get_message()).unwrap();
+@@ -979,7 +979,7 @@ impl JsError {
+     let js_format_exception_cb =
+       exception_state.js_format_exception_cb.borrow().clone();
+     if let Some(format_exception_cb) = js_format_exception_cb {
+-      let format_exception_cb = format_exception_cb.open(scope);
++      let format_exception_cb = v8::Local::new(scope, &format_exception_cb);
+       let this = v8::undefined(scope).into();
+       let formatted = format_exception_cb.call(scope, this, &[exception]);
+       if let Some(formatted) = formatted
+diff --git a/libs/core/modules/map.rs b/libs/core/modules/map.rs
+index 6ebc2b1..49b1a3b 100644
+--- a/libs/core/modules/map.rs
++++ b/libs/core/modules/map.rs
+@@ -1728,7 +1728,7 @@ impl ModuleMap {
+         }
+ 
+         // No pending TLA, safe to resolve immediately
+-        let resolver = resolver_handle.open(scope);
++        let resolver = v8::Local::new(scope, &resolver_handle);
+         let module_namespace = module.get_module_namespace();
+         resolver.resolve(scope, module_namespace).unwrap();
+ 
+@@ -1745,7 +1745,7 @@ impl ModuleMap {
+     {
+       match self.lazy_load_esm_module(scope, module_specifier.as_str()) {
+         Ok(module_ns) => {
+-          let resolver = resolver_handle.open(scope);
++          let resolver = v8::Local::new(scope, &resolver_handle);
+           let module_ns_local = v8::Local::new(scope, module_ns);
+           resolver.resolve(scope, module_ns_local).unwrap();
+           return false;
+@@ -1753,7 +1753,7 @@ impl ModuleMap {
+         Err(e) => {
+           let exception = e.to_v8_error(scope);
+           let exception_local = v8::Local::new(scope, exception);
+-          let resolver = resolver_handle.open(scope);
++          let resolver = v8::Local::new(scope, &resolver_handle);
+           resolver.reject(scope, exception_local).unwrap();
+           return false;
+         }
+@@ -1776,7 +1776,7 @@ impl ModuleMap {
+         .lazy_load_synthetic_esm_module(scope, module_specifier.as_str())
+       {
+         Ok(module_ns) => {
+-          let resolver = resolver_handle.open(scope);
++          let resolver = v8::Local::new(scope, &resolver_handle);
+           let module_ns_local = v8::Local::new(scope, module_ns);
+           resolver.resolve(scope, module_ns_local).unwrap();
+           return false;
+@@ -1784,7 +1784,7 @@ impl ModuleMap {
+         Err(e) => {
+           let exception = e.to_v8_error(scope);
+           let exception_local = v8::Local::new(scope, exception);
+-          let resolver = resolver_handle.open(scope);
++          let resolver = v8::Local::new(scope, &resolver_handle);
+           resolver.reject(scope, exception_local).unwrap();
+           return false;
+         }
+@@ -2129,7 +2129,7 @@ impl ModuleMap {
+     let module_handle = self.get_handle(id).expect("ModuleInfo not found");
+ 
+     let status = {
+-      let module = module_handle.open(scope);
++      let module = v8::Local::new(scope, &module_handle);
+       module.get_status()
+     };
+ 
+@@ -2225,7 +2225,7 @@ impl ModuleMap {
+     let mut resolved_any = false;
+     let mut still_pending = vec![];
+     for eval in pending {
+-      let promise = eval.promise.open(scope);
++      let promise = v8::Local::new(scope, &eval.promise);
+       match promise.state() {
+         v8::PromiseState::Pending => {
+           still_pending.push(eval);
+@@ -2260,7 +2260,7 @@ impl ModuleMap {
+       let module_namespace = module.get_module_namespace();
+ 
+       for resolver_handle in waiters {
+-        let resolver = resolver_handle.open(scope);
++        let resolver = v8::Local::new(scope, &resolver_handle);
+         resolver.resolve(scope, module_namespace).unwrap();
+       }
+       if !JsRealm::state_from_scope(scope).has_tick_scheduled() {
+@@ -2280,7 +2280,7 @@ impl ModuleMap {
+     if let Some(waiters) = waiters {
+       let exception = v8::Local::new(scope, exception);
+       for resolver_handle in waiters {
+-        let resolver = resolver_handle.open(scope);
++        let resolver = v8::Local::new(scope, &resolver_handle);
+         resolver.reject(scope, exception).unwrap();
+       }
+       if !JsRealm::state_from_scope(scope).has_tick_scheduled() {
+@@ -2301,7 +2301,7 @@ impl ModuleMap {
+       .remove(&id)
+       .expect("Invalid dynamic import id")
+       .resolver;
+-    let resolver = resolver_handle.open(scope);
++    let resolver = v8::Local::new(scope, &resolver_handle);
+ 
+     let exception = v8::Local::new(scope, exception);
+     resolver.reject(scope, exception).unwrap();
+@@ -2322,7 +2322,7 @@ impl ModuleMap {
+       .remove(&id)
+       .expect("Invalid dynamic import id")
+       .resolver;
+-    let resolver = resolver_handle.open(scope);
++    let resolver = v8::Local::new(scope, &resolver_handle);
+ 
+     let module = self
+       .data
+@@ -2546,7 +2546,7 @@ impl ModuleMap {
+                     .remove(&dyn_import_id)
+                     .expect("Invalid dynamic import id")
+                     .resolver;
+-                  let resolver = resolver_handle.open(tc_scope);
++                  let resolver = v8::Local::new(tc_scope, &resolver_handle);
+                   resolver.resolve(tc_scope, module_namespace).unwrap();
+                   tc_scope.perform_microtask_checkpoint();
+                 }
+@@ -2594,7 +2594,7 @@ impl ModuleMap {
+                 let source = data.sources.get(&key).expect("Source had to have been inserted successfully, or recursion would error.");
+                 v8::Local::new(scope, source).into()
+               };
+-              let resolver = state.resolver.open(scope);
++              let resolver = v8::Local::new(scope, &state.resolver);
+               resolver.resolve(scope, source).unwrap();
+             }
+           }
+@@ -2643,7 +2643,7 @@ impl ModuleMap {
+       .get_handle(module_id)
+       .expect("ModuleInfo not found");
+ 
+-    let module = module_handle.open(scope);
++    let module = v8::Local::new(scope, &module_handle);
+ 
+     if module.get_status() == v8::ModuleStatus::Errored {
+       let exception = module.get_exception();
+diff --git a/libs/core/ops_builtin_v8.rs b/libs/core/ops_builtin_v8.rs
+index 66540fc..ef7781d 100644
+--- a/libs/core/ops_builtin_v8.rs
++++ b/libs/core/ops_builtin_v8.rs
+@@ -1391,9 +1391,7 @@ pub fn wasm_streaming_callback<'a>(
+ 
+   let undefined = v8::undefined(scope);
+   let rid = serde_v8::to_v8(scope, streaming_rid).unwrap();
+-  cb_handle
+-    .open(scope)
+-    .call(scope, undefined.into(), &[arg, rid]);
++  v8::Local::new(scope, &cb_handle).call(scope, undefined.into(), &[arg, rid]);
+ }
+ 
+ // This op is re-entrant as it makes a v8 call. It also cannot be fast because
+diff --git a/libs/core/runtime/bindings.rs b/libs/core/runtime/bindings.rs
+index 052efb3..3d76c43 100644
+--- a/libs/core/runtime/bindings.rs
++++ b/libs/core/runtime/bindings.rs
+@@ -20,6 +20,7 @@ use crate::FastString;
+ use crate::JsRuntime;
+ use crate::ModuleType;
+ use crate::OpDecl;
++use crate::RequestedModuleType;
+ use crate::cppgc::FunctionTemplateData;
+ use crate::cppgc::cppgc_template_constructor;
+ use crate::error::CoreError;
+@@ -590,6 +591,76 @@ pub(crate) fn initialize_deno_core_ops_bindings<'s, 'i>(
+   }
+ }
+ 
++pub(crate) fn synchronize_snapshotted_core_ops(
++  scope: &mut v8::PinScope,
++  context: v8::Local<v8::Context>,
++  module_map: &ModuleMap,
++) {
++  let Some(module_id) =
++    module_map.get_id("ext:core/mod.js", RequestedModuleType::None)
++  else {
++    return;
++  };
++  let Ok(namespace) = module_map.get_module_namespace(scope, module_id) else {
++    return;
++  };
++  let namespace = v8::Local::new(scope, namespace);
++  let core_key = CORE.v8_string(scope).unwrap();
++  let Some(module_core) = namespace.get(scope, core_key.into()) else {
++    return;
++  };
++  let Ok(module_core) = v8::Local::<v8::Object>::try_from(module_core) else {
++    return;
++  };
++  let ops_key = OPS.v8_string(scope).unwrap();
++  let Some(module_ops) = module_core.get(scope, ops_key.into()) else {
++    return;
++  };
++  let Ok(module_ops) = v8::Local::<v8::Object>::try_from(module_ops) else {
++    return;
++  };
++
++  let global = context.global(scope);
++  let deno_key = DENO.v8_string(scope).unwrap();
++  let Some(deno_obj) = global.get(scope, deno_key.into()) else {
++    return;
++  };
++  let Ok(deno_obj) = v8::Local::<v8::Object>::try_from(deno_obj) else {
++    return;
++  };
++  let Some(live_core) = deno_obj.get(scope, core_key.into()) else {
++    return;
++  };
++  let Ok(live_core) = v8::Local::<v8::Object>::try_from(live_core) else {
++    return;
++  };
++  let Some(live_ops) = live_core.get(scope, ops_key.into()) else {
++    return;
++  };
++  let Ok(live_ops) = v8::Local::<v8::Object>::try_from(live_ops) else {
++    return;
++  };
++  let Some(names) = live_ops.get_own_property_names(
++    scope,
++    v8::GetPropertyNamesArgsBuilder::new()
++      .mode(v8::KeyCollectionMode::OwnOnly)
++      .property_filter(v8::PropertyFilter::SKIP_SYMBOLS)
++      .key_conversion(v8::KeyConversionMode::ConvertToString)
++      .build(),
++  ) else {
++    return;
++  };
++  for index in 0..names.length() {
++    let Some(name) = names.get_index(scope, index) else {
++      continue;
++    };
++    let Some(value) = live_ops.get(scope, name) else {
++      continue;
++    };
++    module_ops.set(scope, name, value);
++  }
++}
++
+ /// Re-attach fast-call overloads to snapshotted ops after deserialization.
+ ///
+ /// Fast-call setup creates V8 `Managed<CFunctionWithSignature>` resources,
+@@ -1019,11 +1090,27 @@ pub(crate) fn op_ctx_template<'s, 'i>(
+   // template is still wired to slow_fn; ops fall back to the slow callback
+   // path until a follow-up runtime hook re-attaches the fast overloads after
+   // snapshot deserialization.
+-  let template = if let Some(fast_function) = fast_fn
++  let template = if fast_fn.is_some()
+     && !will_snapshot
+     && !op_ctx.decl.constructable
+   {
+-    builder.build_fast(scope, &[fast_function])
++    let fast_function = if op_ctx.metrics_enabled() {
++      op_ctx.decl.fast_fn_with_metrics.as_ref()
++    } else {
++      op_ctx.decl.fast_fn.as_ref()
++    }
++    .unwrap();
++    // SAFETY: V8 stores the raw `CFunction` pointers from `overloads` directly
++    // in the `FunctionTemplateInfo`, so `build_fast` requires a `'static`
++    // slice. The overload lives in `op_ctx`, which outlives every
++    // `FunctionTemplate` created from it (both are torn down at isolate
++    // disposal), so extending the borrow to `'static` is sound.
++    let overloads: &'static [v8::fast_api::CFunction] = unsafe {
++      std::mem::transmute::<&[_], &'static [_]>(std::slice::from_ref(
++        fast_function,
++      ))
++    };
++    builder.build_fast(scope, overloads)
+   } else {
+     builder.build(scope)
+   };
+diff --git a/libs/core/runtime/jsrealm.rs b/libs/core/runtime/jsrealm.rs
+index 53ab4ff..42391b2 100644
+--- a/libs/core/runtime/jsrealm.rs
++++ b/libs/core/runtime/jsrealm.rs
+@@ -339,7 +339,7 @@ impl JsRealmInner {
+     std::mem::take(&mut *state.js_wasm_streaming_cb.borrow_mut());
+ 
+     {
+-      let ctx = self.context().open(scope);
++      let ctx = v8::Local::new(scope, self.context());
+       // SAFETY: Clear all embedder data
+       unsafe {
+         let ctx_state =
 diff --git a/libs/core/runtime/jsruntime.rs b/libs/core/runtime/jsruntime.rs
-index 6f1ce4d..84ff9d4 100644
+index 37d7b6e..b408836 100644
 --- a/libs/core/runtime/jsruntime.rs
 +++ b/libs/core/runtime/jsruntime.rs
-@@ -1566,12 +1566,24 @@ impl JsRuntime {
+@@ -1187,6 +1187,9 @@ impl JsRuntime {
+           mapper.add_ext_source_map(ModuleName::from_static(key), map.into());
+         }
+       }
++      if has_snapshot {
++        bindings::synchronize_snapshotted_core_ops(scope, context, &module_map);
++      }
+       startup_phase_end(_phase, "load module map from snapshot");
+ 
+       if context_state.ext_import_meta_proto.borrow().is_none() {
+@@ -1580,12 +1583,24 @@ impl JsRuntime {
        Rc::new(ExtModuleLoader::new(sources, ext_code_cache.clone()));
      *module_map.loader.borrow_mut() = ext_loader.clone();
  
@@ -108,7 +417,7 @@ index 6f1ce4d..84ff9d4 100644
      }
  
      // Execute extension scripts
-@@ -1602,34 +1614,54 @@ impl JsRuntime {
+@@ -1616,34 +1631,54 @@ impl JsRuntime {
        }
      }
  
@@ -181,6 +490,155 @@ index 6f1ce4d..84ff9d4 100644
  
      Ok(())
    }
+@@ -2089,7 +2124,7 @@ impl JsRuntime {
+   ) -> impl Future<Output = Result<v8::Global<v8::Value>, Box<JsError>>> + use<>
+   {
+     v8::tc_scope!(let scope, scope);
+-    let cb = function.open(scope);
++    let cb = v8::Local::new(scope, function);
+     let this = v8::undefined(scope).into();
+     let promise = if args.is_empty() {
+       cb.call(scope, this, &[])
+@@ -3367,7 +3402,7 @@ impl JsRuntime {
+     let run_immediate_callbacks_cb =
+       context_state.run_immediate_callbacks_cb.borrow();
+     let run_immediate_callbacks_cb =
+-      run_immediate_callbacks_cb.as_ref().unwrap().open(tc_scope);
++      v8::Local::new(tc_scope, run_immediate_callbacks_cb.as_ref().unwrap());
+ 
+     run_immediate_callbacks_cb.call(tc_scope, undefined, &[]);
+ 
+@@ -3437,7 +3472,8 @@ impl JsRuntime {
+     v8::tc_scope!(let tc_scope, scope);
+ 
+     let process_timers_cb = context_state.js_process_timers_cb.borrow();
+-    let process_timers_fn = process_timers_cb.as_ref().unwrap().open(tc_scope);
++    let process_timers_fn =
++      v8::Local::new(tc_scope, process_timers_cb.as_ref().unwrap());
+     let now_val = v8::Number::new(tc_scope, now);
+     let undefined: v8::Local<v8::Value> = v8::undefined(tc_scope).into();
+ 
+@@ -3548,7 +3584,7 @@ impl JsRuntime {
+     v8::tc_scope!(let tc_scope, scope);
+ 
+     let tick_cb = context_state.js_event_loop_tick_cb.borrow();
+-    let tick_fn = tick_cb.as_ref().unwrap().open(tc_scope);
++    let tick_fn = v8::Local::new(tc_scope, tick_cb.as_ref().unwrap());
+     tick_fn.call(tc_scope, undefined, args.as_slice());
+ 
+     if let Some(exception) = tc_scope.exception() {
+@@ -3580,7 +3616,7 @@ impl JsRuntime {
+         .borrow()
+         .as_ref()
+       {
+-        let function = handler.open(scope);
++        let function = v8::Local::new(scope, handler);
+         let args = [
+           v8::Local::new(scope, promise).into(),
+           v8::Local::new(scope, result),
+@@ -3626,7 +3662,7 @@ impl JsRuntime {
+ 
+     let handle_rejections_cb = context_state.js_handle_rejections_cb.borrow();
+     let handle_rejections_fn =
+-      handle_rejections_cb.as_ref().unwrap().open(tc_scope);
++      v8::Local::new(tc_scope, handle_rejections_cb.as_ref().unwrap());
+     let undefined: v8::Local<v8::Value> = v8::undefined(tc_scope).into();
+     handle_rejections_fn.call(tc_scope, undefined, args.as_slice());
+ 
+@@ -3648,7 +3684,7 @@ impl JsRuntime {
+     v8::tc_scope!(let tc_scope, scope);
+ 
+     let drain_cb = context_state.js_drain_next_tick_and_macrotasks_cb.borrow();
+-    let drain_fn = drain_cb.as_ref().unwrap().open(tc_scope);
++    let drain_fn = v8::Local::new(tc_scope, drain_cb.as_ref().unwrap());
+     drain_fn.call(tc_scope, undefined, &[]);
+ 
+     if let Some(exception) = tc_scope.exception() {
+diff --git a/libs/core/runtime/tests/misc.rs b/libs/core/runtime/tests/misc.rs
+index 80b88eb..99c959c 100644
+--- a/libs/core/runtime/tests/misc.rs
++++ b/libs/core/runtime/tests/misc.rs
+@@ -47,13 +47,13 @@ fn test_execute_script_return_value() {
+   let value_global = runtime.execute_script("a.js", "a = 1 + 2").unwrap();
+   {
+     deno_core::scope!(scope, runtime);
+-    let value = value_global.open(scope);
++    let value = v8::Local::new(scope, &value_global);
+     assert_eq!(value.integer_value(scope).unwrap(), 3);
+   }
+   let value_global = runtime.execute_script("b.js", "b = 'foobar'").unwrap();
+   {
+     deno_core::scope!(scope, runtime);
+-    let value = value_global.open(scope);
++    let value = v8::Local::new(scope, &value_global);
+     assert!(value.is_string());
+     assert_eq!(
+       value.to_string(scope).unwrap().to_rust_string_lossy(scope),
+@@ -280,13 +280,13 @@ async fn test_resolve_value_generic(
+     }
+     Ok(Some(v)) => {
+       let value = result_global.unwrap();
+-      let value = value.open(scope);
++      let value = v8::Local::new(scope, &value);
+       assert_eq!(value.integer_value(scope).unwrap(), v as i64);
+     }
+     Err(e) => {
+       let Err(err) = result_global else {
+         let value = result_global.unwrap();
+-        let value = value.open(scope);
++        let value = v8::Local::new(scope, &value);
+         panic!(
+           "Expected an error, got {}",
+           value.to_rust_string_lossy(scope)
+@@ -418,7 +418,7 @@ async fn wasm_streaming_op_invocation_in_import() {
+   #[allow(deprecated, reason = "test code")]
+   let value = runtime.resolve_value(promise).await.unwrap();
+   deno_core::scope!(scope, runtime);
+-  let val = value.open(scope);
++  let val = v8::Local::new(scope, &value);
+   assert!(val.is_object());
+ }
+ 
+@@ -1339,7 +1339,7 @@ async fn generic_in_extension_middleware() {
+ 
+   // Check the result
+   deno_core::scope!(scope, &mut runtime);
+-  let value = value_global.open(scope);
++  let value = v8::Local::new(scope, &value_global);
+ 
+   let result = value.to_rust_string_lossy(scope);
+   assert_eq!(result, "Hello World and Hello World");
+@@ -1559,7 +1559,7 @@ async fn global_template_middleware() {
+     _key: v8::Local<'s, v8::Name>,
+     _value: v8::Local<'s, v8::Value>,
+     _args: v8::PropertyCallbackArguments<'s>,
+-    _rv: v8::ReturnValue<()>,
++    _rv: v8::ReturnValue<'_, v8::Boolean>,
+   ) -> v8::Intercepted {
+     CALLS.lock().push("setter".to_string());
+     v8::Intercepted::kNo
+@@ -1570,7 +1570,7 @@ async fn global_template_middleware() {
+     _key: v8::Local<'s, v8::Name>,
+     _descriptor: &v8::PropertyDescriptor,
+     _args: v8::PropertyCallbackArguments<'s>,
+-    _rv: v8::ReturnValue<()>,
++    _rv: v8::ReturnValue<'_, v8::Boolean>,
+   ) -> v8::Intercepted {
+     CALLS.lock().push("definer".to_string());
+     v8::Intercepted::kNo
+diff --git a/libs/core/runtime/tests/ops.rs b/libs/core/runtime/tests/ops.rs
+index 79010da..7f9c7d0 100644
+--- a/libs/core/runtime/tests/ops.rs
++++ b/libs/core/runtime/tests/ops.rs
+@@ -193,7 +193,7 @@ fn test_op_high_arity() {
+     .execute_script("test.js", "Deno.core.ops.op_add_4(1, 2, 3, 4)")
+     .unwrap();
+   deno_core::scope!(scope, runtime);
+-  assert_eq!(r.open(scope).integer_value(scope), Some(10));
++  assert_eq!(v8::Local::new(scope, &r).integer_value(scope), Some(10));
+ }
+ 
+ #[test]
 diff --git a/runtime/ops/bootstrap.rs b/runtime/ops/bootstrap.rs
 index 5f20276..6f664a0 100644
 --- a/runtime/ops/bootstrap.rs
@@ -197,6 +655,53 @@ index 5f20276..6f664a0 100644
        target,
      }
    }
+diff --git a/runtime/ops/worker_host.rs b/runtime/ops/worker_host.rs
+index 2d67032..4c9440f 100644
+--- a/runtime/ops/worker_host.rs
++++ b/runtime/ops/worker_host.rs
+@@ -95,6 +95,7 @@ struct FormatJsErrorFnHolder(Option<Arc<FormatJsErrorFn>>);
+ 
+ pub struct WorkerThread {
+   worker_handle: WebWorkerHandle,
++  join_handle: Option<std::thread::JoinHandle<()>>,
+   worker_type: WorkerThreadType,
+   cancel_handle: Rc<CancelHandle>,
+   cpu_thread_handle: Arc<AtomicU64>,
+@@ -113,10 +114,16 @@ impl WorkerThread {
+     self.worker_handle.clone().terminate();
+   }
+ 
+-  fn finish_termination(self) {
++  fn finish_termination(mut self) {
+     // Cancel recv ops when terminating the worker, so they don't show up as
+     // pending ops.
+     self.cancel_handle.cancel();
++    self.worker_handle.clone().terminate();
++    // Worker teardown may still be flushing profiler output after its
++    // communication channels close.
++    if let Some(join_handle) = self.join_handle.take() {
++      let _ = join_handle.join();
++    }
+   }
+ }
+ 
+@@ -334,7 +341,7 @@ fn op_create_worker(
+   let cpu_thread_handle_writer = cpu_thread_handle.clone();
+ 
+   // Spawn it
+-  thread_builder.spawn(move || {
++  let join_handle = thread_builder.spawn(move || {
+     // Capture the OS thread handle for CPU usage queries from the host.
+     cpu_thread_handle_writer
+       .store(capture_current_thread_handle(), Ordering::Release);
+@@ -402,6 +409,7 @@ fn op_create_worker(
+ 
+   let worker_thread = WorkerThread {
+     worker_handle: worker_handle.into(),
++    join_handle: Some(join_handle),
+     worker_type: args.worker_type,
+     cancel_handle: CancelHandle::new_rc(),
+     cpu_thread_handle,
 diff --git a/runtime/transpile.rs b/runtime/transpile.rs
 index e0ecaa1..20320e2 100644
 --- a/runtime/transpile.rs
@@ -298,153 +803,3 @@ index e0ecaa1..20320e2 100644
      Ok((source_text.into(), maybe_source_map))
    }
  }
-diff --git a/libs/core/runtime/bindings.rs b/libs/core/runtime/bindings.rs
-index 052efb385a..41134d4634 100644
---- a/libs/core/runtime/bindings.rs
-+++ b/libs/core/runtime/bindings.rs
-@@ -20,6 +20,7 @@ use crate::FastString;
- use crate::JsRuntime;
- use crate::ModuleType;
- use crate::OpDecl;
-+use crate::RequestedModuleType;
- use crate::cppgc::FunctionTemplateData;
- use crate::cppgc::cppgc_template_constructor;
- use crate::error::CoreError;
-@@ -590,6 +591,76 @@ pub(crate) fn initialize_deno_core_ops_bindings<'s, 'i>(
-   }
- }
- 
-+pub(crate) fn synchronize_snapshotted_core_ops(
-+  scope: &mut v8::PinScope,
-+  context: v8::Local<v8::Context>,
-+  module_map: &ModuleMap,
-+) {
-+  let Some(module_id) =
-+    module_map.get_id("ext:core/mod.js", RequestedModuleType::None)
-+  else {
-+    return;
-+  };
-+  let Ok(namespace) = module_map.get_module_namespace(scope, module_id) else {
-+    return;
-+  };
-+  let namespace = v8::Local::new(scope, namespace);
-+  let core_key = CORE.v8_string(scope).unwrap();
-+  let Some(module_core) = namespace.get(scope, core_key.into()) else {
-+    return;
-+  };
-+  let Ok(module_core) = v8::Local::<v8::Object>::try_from(module_core) else {
-+    return;
-+  };
-+  let ops_key = OPS.v8_string(scope).unwrap();
-+  let Some(module_ops) = module_core.get(scope, ops_key.into()) else {
-+    return;
-+  };
-+  let Ok(module_ops) = v8::Local::<v8::Object>::try_from(module_ops) else {
-+    return;
-+  };
-+
-+  let global = context.global(scope);
-+  let deno_key = DENO.v8_string(scope).unwrap();
-+  let Some(deno_obj) = global.get(scope, deno_key.into()) else {
-+    return;
-+  };
-+  let Ok(deno_obj) = v8::Local::<v8::Object>::try_from(deno_obj) else {
-+    return;
-+  };
-+  let Some(live_core) = deno_obj.get(scope, core_key.into()) else {
-+    return;
-+  };
-+  let Ok(live_core) = v8::Local::<v8::Object>::try_from(live_core) else {
-+    return;
-+  };
-+  let Some(live_ops) = live_core.get(scope, ops_key.into()) else {
-+    return;
-+  };
-+  let Ok(live_ops) = v8::Local::<v8::Object>::try_from(live_ops) else {
-+    return;
-+  };
-+  let Some(names) = live_ops.get_own_property_names(
-+    scope,
-+    v8::GetPropertyNamesArgsBuilder::new()
-+      .mode(v8::KeyCollectionMode::OwnOnly)
-+      .property_filter(v8::PropertyFilter::SKIP_SYMBOLS)
-+      .key_conversion(v8::KeyConversionMode::ConvertToString)
-+      .build(),
-+  ) else {
-+    return;
-+  };
-+  for index in 0..names.length() {
-+    let Some(name) = names.get_index(scope, index) else {
-+      continue;
-+    };
-+    let Some(value) = live_ops.get(scope, name) else {
-+      continue;
-+    };
-+    module_ops.set(scope, name, value);
-+  }
-+}
-+
- /// Re-attach fast-call overloads to snapshotted ops after deserialization.
- ///
- /// Fast-call setup creates V8 `Managed<CFunctionWithSignature>` resources,
-diff --git a/libs/core/runtime/jsruntime.rs b/libs/core/runtime/jsruntime.rs
-index 37d7b6e478..a2e22e27b6 100644
---- a/libs/core/runtime/jsruntime.rs
-+++ b/libs/core/runtime/jsruntime.rs
-@@ -1187,6 +1187,9 @@ impl JsRuntime {
-           mapper.add_ext_source_map(ModuleName::from_static(key), map.into());
-         }
-       }
-+      if has_snapshot {
-+        bindings::synchronize_snapshotted_core_ops(scope, context, &module_map);
-+      }
-       startup_phase_end(_phase, "load module map from snapshot");
- 
-       if context_state.ext_import_meta_proto.borrow().is_none() {
-diff --git a/runtime/ops/worker_host.rs b/runtime/ops/worker_host.rs
-index 2d6703245f..4c9440f82c 100644
---- a/runtime/ops/worker_host.rs
-+++ b/runtime/ops/worker_host.rs
-@@ -95,6 +95,7 @@ struct FormatJsErrorFnHolder(Option<Arc<FormatJsErrorFn>>);
- 
- pub struct WorkerThread {
-   worker_handle: WebWorkerHandle,
-+  join_handle: Option<std::thread::JoinHandle<()>>,
-   worker_type: WorkerThreadType,
-   cancel_handle: Rc<CancelHandle>,
-   cpu_thread_handle: Arc<AtomicU64>,
-@@ -113,10 +114,16 @@ impl WorkerThread {
-     self.worker_handle.clone().terminate();
-   }
- 
--  fn finish_termination(self) {
-+  fn finish_termination(mut self) {
-     // Cancel recv ops when terminating the worker, so they don't show up as
-     // pending ops.
-     self.cancel_handle.cancel();
-+    self.worker_handle.clone().terminate();
-+    // Worker teardown may still be flushing profiler output after its
-+    // communication channels close.
-+    if let Some(join_handle) = self.join_handle.take() {
-+      let _ = join_handle.join();
-+    }
-   }
- }
- 
-@@ -334,7 +341,7 @@ fn op_create_worker(
-   let cpu_thread_handle_writer = cpu_thread_handle.clone();
- 
-   // Spawn it
--  thread_builder.spawn(move || {
-+  let join_handle = thread_builder.spawn(move || {
-     // Capture the OS thread handle for CPU usage queries from the host.
-     cpu_thread_handle_writer
-       .store(capture_current_thread_handle(), Ordering::Release);
-@@ -402,6 +409,7 @@ fn op_create_worker(
- 
-   let worker_thread = WorkerThread {
-     worker_handle: worker_handle.into(),
-+    join_handle: Some(join_handle),
-     worker_type: args.worker_type,
-     cancel_handle: CancelHandle::new_rc(),
-     cpu_thread_handle,

@@ -101,6 +101,20 @@ pub extern "C" fn v8__Context__AllowCodeGenerationFromStrings(
 ) {
 }
 
+/// JSC cannot detach a context's global proxy from its global object: the
+/// two are created together and stay bound for the context's lifetime, so
+/// the context keeps its global.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Context__DetachGlobal(_this: *const Context) {}
+
+/// Temporal's `Temporal.Now` reads JSC's own clock; JSC offers no override.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Context__SetTemporalHostSystemUTCEpochNanosecondsCallback(
+  _this: *const Context,
+  _callback: crate::context::TemporalHostSystemUTCEpochNanosecondsCallback,
+) {
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Context_IsCodeGenerationFromStringsAllowed(
   _this: *const Context,
@@ -387,6 +401,27 @@ pub extern "C" fn v8__Isolate__RemoveNearHeapLimitCallback(
 pub extern "C" fn v8__Isolate__SetIdle(
   _isolate: *mut RealIsolate,
   _is_idle: bool,
+) {
+}
+
+/// A GC heuristic hint in V8 (a disposed context usually leaves garbage).
+/// JSC schedules its own collections and the hint has no equivalent.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Isolate__ContextDisposedNotification(
+  _isolate: *mut RealIsolate,
+  _dependants: crate::isolate::ContextDependants,
+) {
+}
+
+/// Code generation from strings is always allowed on this backend
+/// (`Context::AllowCodeGenerationFromStrings` is a no-op), and V8 only
+/// consults this callback for a context where it is disallowed or when the
+/// source is not a string. JSC's C API has no hook on `eval` / `Function`
+/// compilation to call it from, so the callback is not consulted.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Isolate__SetModifyCodeGenerationFromStringsCallback(
+  _isolate: *mut RealIsolate,
+  _callback: *const c_void,
 ) {
 }
 
@@ -707,17 +742,34 @@ pub extern "C" fn v8__Isolate__CreateParams__SIZEOF() -> usize {
   std::mem::size_of::<crate::isolate_create_params::raw::CreateParams>()
 }
 
+/// What a `MicrotaskQueue` pointer points at: microtasks run on JSC's own
+/// per-VM queue, so all this records is the isolate the queue was made for.
+struct QueueState {
+  isolate: *mut RealIsolate,
+}
+
 /// Since rusty_v8 v152.0.0 the owning handle and the queue it points at are
 /// separate types (`MicrotaskQueueHandle` owns, `MicrotaskQueue` is borrowed
 /// from it). This backend keeps one allocation for both, so the handle is the
 /// queue pointer and `Get` is the identity.
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__MicrotaskQueueHandle__New(
-  _isolate: *mut RealIsolate,
+  isolate: *mut RealIsolate,
   _policy: MicrotasksPolicy,
 ) -> *mut MicrotaskQueue {
-  let b: Box<u8> = Box::new(0);
-  Box::into_raw(b) as *mut MicrotaskQueue
+  Box::into_raw(Box::new(QueueState { isolate })) as *mut MicrotaskQueue
+}
+
+/// Only queues made by `MicrotaskQueueHandle::New` exist on this backend
+/// (`Context::GetMicrotaskQueue` reports none), so a queue belongs to the
+/// isolate it was created for.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__MicrotaskQueue__BelongsTo(
+  queue: *const MicrotaskQueue,
+  isolate: *mut RealIsolate,
+) -> bool {
+  !queue.is_null()
+    && unsafe { (*(queue as *const QueueState)).isolate } == isolate
 }
 
 #[unsafe(no_mangle)]
@@ -733,7 +785,7 @@ pub extern "C" fn v8__MicrotaskQueueHandle__DELETE(
 ) {
   if !handle.is_null() {
     unsafe {
-      drop(Box::from_raw(handle as *mut u8));
+      drop(Box::from_raw(handle as *mut QueueState));
     }
   }
 }

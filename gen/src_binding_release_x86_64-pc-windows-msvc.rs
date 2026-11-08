@@ -588,10 +588,10 @@ pub use self::v8_GCType as v8__GCType;
 #[doc = " Interceptor callbacks use this value to indicate whether the request was\n intercepted or not.\n\n The values for constants and type are chosen this way for better\n performance."]
 pub use self::v8_Intercepted as v8__Intercepted;
 pub const v8__MAJOR_VERSION: u32 = 15;
-pub const v8__MINOR_VERSION: u32 = 2;
-pub const v8__BUILD_NUMBER: u32 = 124;
-pub const v8__PATCH_LEVEL: u32 = 1;
-pub const v8__VERSION_STRING: &::std::ffi::CStr = c"15.2.124.1-rusty";
+pub const v8__MINOR_VERSION: u32 = 8;
+pub const v8__BUILD_NUMBER: u32 = 62;
+pub const v8__PATCH_LEVEL: u32 = 23;
+pub const v8__VERSION_STRING: &::std::ffi::CStr = c"15.8.62.23-rusty";
 #[repr(C)]
 #[derive(Debug)]
 pub struct ExternalConstOneByteStringResource {
@@ -884,7 +884,13 @@ pub enum UseCounterFeature {
   kOBSOLETE_WasmResizableBuffers = 183,
   kInvalidatedArrayBufferMutableProtector = 184,
   kHoleyArrayReadthrough = 185,
-  kUseCounterFeatureCount = 186,
+  kWasmGCAllocation = 186,
+  kModuleNamespaceMissingDefaultWithStarExport = 187,
+  kRegExpMatcherFlagsMismatch = 188,
+  kRegExpCustomSpecies = 189,
+  kWasmWideArithmetic = 190,
+  kBigInt = 191,
+  kUseCounterFeatureCount = 192,
 }
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]

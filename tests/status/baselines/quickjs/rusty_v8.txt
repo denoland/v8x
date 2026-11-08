@@ -1,6 +1,6 @@
 # Baseline: tests that PASS for backend=quickjs suite=rusty_v8.
 # Ratchet — CI goes red if any of these regress. Add new passes here
-# (run.mjs --update). 303 passing. DO NOT hand-sort; the
+# (run.mjs --update). 345 passing. DO NOT hand-sort; the
 # harness keeps this sorted + unique.
 rv8_slots::clear_all_context_slots
 rv8_slots::context_slots
@@ -18,30 +18,46 @@ rv8_test_api::allow_javascript_execution_scope
 rv8_test_api::allow_scope_in_read_host_object
 rv8_test_api::array
 rv8_test_api::array_buffer
+rv8_test_api::array_buffer_backing_store_modes
+rv8_test_api::array_buffer_maybe_new
+rv8_test_api::array_buffer_resizable_backing_store
 rv8_test_api::array_buffer_view
 rv8_test_api::array_buffer_with_shared_backing_store
+rv8_test_api::array_iterate
+rv8_test_api::array_iterate_holey
+rv8_test_api::array_iterate_throws
 rv8_test_api::backing_store_data
 rv8_test_api::backing_store_from_empty_boxed_slice
 rv8_test_api::backing_store_from_empty_vec
 rv8_test_api::backing_store_resizable
 rv8_test_api::backing_store_segfault
 rv8_test_api::bigint
+rv8_test_api::boolean_value
 rv8_test_api::bubbling_up_exception
 rv8_test_api::bubbling_up_exception_in_function_call
+rv8_test_api::cached_data_compatibility_check
 rv8_test_api::cached_data_version_tag
 rv8_test_api::clear_kept_objects
 rv8_test_api::clear_slots_annex_uninitialized
 rv8_test_api::code_cache
 rv8_test_api::code_cache_script
+rv8_test_api::code_generation_from_strings_callback
+rv8_test_api::code_generation_from_strings_callback_non_string_source
 rv8_test_api::compile_function
+rv8_test_api::compile_options_is_valid
 rv8_test_api::compiled_wasm_module
 rv8_test_api::constructor
+rv8_test_api::context_disposed_notification
 rv8_test_api::context_embedder_data
+rv8_test_api::context_embedder_data_tag_out_of_range_panics_on_get
+rv8_test_api::context_embedder_data_tag_out_of_range_panics_on_set
 rv8_test_api::context_from_object_template
 rv8_test_api::context_get_extras_binding_object
 rv8_test_api::context_promise_hooks
 rv8_test_api::context_promise_hooks_partial
 rv8_test_api::context_scope
+rv8_test_api::context_set_microtask_queue_panics_after_detach
+rv8_test_api::context_tagged_embedder_data
 rv8_test_api::context_with_object_template
 rv8_test_api::continuation_preserved_embedder_data
 rv8_test_api::counter_lookup_callback
@@ -71,8 +87,14 @@ rv8_test_api::current_script_name_or_source_url
 rv8_test_api::current_stack_trace
 rv8_test_api::data_view
 rv8_test_api::date
+rv8_test_api::date_parse
 rv8_test_api::date_time_configuration_change_notification
+rv8_test_api::date_to_string
+rv8_test_api::default_allocator_for_isolate_group
 rv8_test_api::deref_empty_backing_store
+rv8_test_api::dictionary_template
+rv8_test_api::dictionary_template_non_ascii_name
+rv8_test_api::dictionary_template_unrepresentable_name
 rv8_test_api::disallow_javascript_execution_scope
 rv8_test_api::drop_weak_from_raw_in_finalizer
 rv8_test_api::dynamic_import
@@ -94,6 +116,7 @@ rv8_test_api::external_twobyte_string
 rv8_test_api::external_twobyte_string_raw
 rv8_test_api::finalizer_on_kept_global
 rv8_test_api::finalizers
+rv8_test_api::find_instance_in_prototype_chain
 rv8_test_api::function
 rv8_test_api::function_builder_raw
 rv8_test_api::function_callback_info_parts
@@ -101,10 +124,12 @@ rv8_test_api::function_code_cache
 rv8_test_api::function_column_and_line_numbers
 rv8_test_api::function_names
 rv8_test_api::function_script_origin_and_id
+rv8_test_api::function_template_has_instance
 rv8_test_api::function_template_intrinsic_data_property
 rv8_test_api::function_template_prototype
 rv8_test_api::function_template_set_accessor_property
 rv8_test_api::function_template_signature
+rv8_test_api::function_template_without_callback
 rv8_test_api::gc_callbacks
 rv8_test_api::get_constructor_name
 rv8_test_api::get_default_locale
@@ -134,6 +159,7 @@ rv8_test_api::host_create_shadow_realm_context_callback
 rv8_test_api::host_defined_options
 rv8_test_api::icu_collator
 rv8_test_api::icu_date
+rv8_test_api::icu_default_time_zone
 rv8_test_api::icu_format
 rv8_test_api::icu_set_common_data_fail
 rv8_test_api::ignore_origin_source_map_empty_string
@@ -149,10 +175,14 @@ rv8_test_api::inspector_inspectable_drops_rust_impl_when_not_added
 rv8_test_api::inspector_schedule_pause_on_next_statement
 rv8_test_api::inspector_string_buffer
 rv8_test_api::inspector_string_view
+rv8_test_api::inspector_unwrap_object
 rv8_test_api::instance_of
 rv8_test_api::instance_template_with_internal_field
+rv8_test_api::internalize_string
+rv8_test_api::is_weak_ref
 rv8_test_api::isolate_data_slots
 rv8_test_api::isolate_drop_order
+rv8_test_api::isolate_groups
 rv8_test_api::isolate_slot_drop_can_access_annex_during_teardown
 rv8_test_api::isolate_termination_methods
 rv8_test_api::json
@@ -166,6 +196,7 @@ rv8_test_api::microtask_queue
 rv8_test_api::microtask_queue_new
 rv8_test_api::microtasks
 rv8_test_api::module_evaluation
+rv8_test_api::module_has_top_level_await
 rv8_test_api::module_instantiation_failures1
 rv8_test_api::module_snapshot
 rv8_test_api::module_stalled_top_level_await
@@ -207,6 +238,7 @@ rv8_test_api::return_value
 rv8_test_api::run_with_rust_allocator
 rv8_test_api::script_compile_and_run
 rv8_test_api::script_compiler_source
+rv8_test_api::script_id
 rv8_test_api::script_origin
 rv8_test_api::security_token
 rv8_test_api::set
@@ -216,6 +248,8 @@ rv8_test_api::set_idle
 rv8_test_api::set_promise_reject_callback
 rv8_test_api::shared_array_buffer
 rv8_test_api::shared_array_buffer_allocator
+rv8_test_api::shared_array_buffer_backing_store_modes
+rv8_test_api::shared_array_buffer_data
 rv8_test_api::shared_isolate_concurrent_use
 rv8_test_api::shared_isolate_conversion_errors_return_the_isolate
 rv8_test_api::shared_isolate_deferred_global_resets_drain_at_lock_boundaries
@@ -240,6 +274,7 @@ rv8_test_api::snapshot_creator_context_embedder_data
 rv8_test_api::snapshot_creator_multiple_contexts
 rv8_test_api::static_source_phase_import
 rv8_test_api::string_concat
+rv8_test_api::string_equals
 rv8_test_api::string_valueview
 rv8_test_api::string_valueview_as_str
 rv8_test_api::string_valueview_to_cow_lossy
@@ -247,6 +282,9 @@ rv8_test_api::string_write_utf8_into
 rv8_test_api::symbol
 rv8_test_api::synthetic_module
 rv8_test_api::take_heap_snapshot
+rv8_test_api::template_set_lazy_data_property
+rv8_test_api::template_set_native_data_property
+rv8_test_api::temporal_host_system_utc_epoch_nanoseconds_callback
 rv8_test_api::terminate_execution
 rv8_test_api::test_detach_key
 rv8_test_api::test_eternals
@@ -266,6 +304,9 @@ rv8_test_api::test_object_get_property_names
 rv8_test_api::test_primitives
 rv8_test_api::test_prototype_api
 rv8_test_api::test_regexp
+rv8_test_api::test_regexp_backtrack_limit
+rv8_test_api::test_regexp_backtrack_limit_too_large_panics
+rv8_test_api::test_regexp_backtrack_limit_zero_panics
 rv8_test_api::test_string
 rv8_test_api::thread_safe_handle_drop_after_isolate
 rv8_test_api::throw_exception
@@ -275,6 +316,7 @@ rv8_test_api::try_catch_caught_lifetime
 rv8_test_api::try_from_data
 rv8_test_api::try_from_value
 rv8_test_api::typed_array_constructors
+rv8_test_api::typed_arrays_over_shared_array_buffer
 rv8_test_api::typeof_checker
 rv8_test_api::uint8_array
 rv8_test_api::unbound_module_script_conversion

@@ -545,6 +545,8 @@ thread_local! {
         RefCell::new(HashMap::new());
 
     static NEXT_MODULE_SCRIPT_ID: std::cell::Cell<int> = const { std::cell::Cell::new(1) };
+
+    static SCRIPT_IDS: RefCell<HashMap<usize, int>> = RefCell::new(HashMap::new());
 }
 
 #[repr(C)]
@@ -4182,6 +4184,101 @@ pub extern "C" fn v8__UnboundModuleScript__CreateCodeCache(
   make_placeholder_code_cache()
 }
 
+/// Header of the code caches this backend produces. QuickJS recompiles from
+/// source anyway, so the cache carries no code, only enough for
+/// `CompatibilityCheck` to tell its own caches from foreign bytes: a magic
+/// number and `CachedDataVersionTag`, both little-endian `u32`s, the way V8
+/// starts its own header.
+const CODE_CACHE_MAGIC: u32 = u32::from_le_bytes(*b"QJSc");
+const CODE_CACHE_HEADER_LEN: usize = 8;
+
+fn code_cache_header() -> [u8; CODE_CACHE_HEADER_LEN] {
+  let mut header = [0u8; CODE_CACHE_HEADER_LEN];
+  header[..4].copy_from_slice(&CODE_CACHE_MAGIC.to_le_bytes());
+  header[4..].copy_from_slice(
+    &super::misc::v8__ScriptCompiler__CachedDataVersionTag().to_le_bytes(),
+  );
+  header
+}
+
+/// Values of `v8::SerializedCodeSanityCheckResult`.
+const SANITY_CHECK_SUCCESS: int = 0;
+const SANITY_CHECK_MAGIC_NUMBER_MISMATCH: int = 1;
+const SANITY_CHECK_VERSION_MISMATCH: int = 2;
+const SANITY_CHECK_INVALID_HEADER: int = 7;
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ScriptCompiler__CachedData__CompatibilityCheck(
+  this: *const CachedData,
+  _isolate: *mut RealIsolate,
+) -> int {
+  if this.is_null() {
+    return SANITY_CHECK_INVALID_HEADER;
+  }
+  let raw = unsafe { &*(this as *const RawCachedData) };
+  if raw.data.is_null() || (raw.length as usize) < CODE_CACHE_HEADER_LEN {
+    return SANITY_CHECK_INVALID_HEADER;
+  }
+  let bytes =
+    unsafe { std::slice::from_raw_parts(raw.data, CODE_CACHE_HEADER_LEN) };
+  let expected = code_cache_header();
+  if bytes[..4] != expected[..4] {
+    return SANITY_CHECK_MAGIC_NUMBER_MISMATCH;
+  }
+  if bytes[4..] != expected[4..] {
+    return SANITY_CHECK_VERSION_MISMATCH;
+  }
+  SANITY_CHECK_SUCCESS
+}
+
+/// Mirrors `v8::ScriptCompiler::CompileOptionsIsValid`.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ScriptCompiler__CompileOptionsIsValid(
+  compile_options: int,
+) -> bool {
+  const CONSUME_CODE_CACHE: int = 1 << 0;
+  const EAGER_COMPILE: int = 1 << 1;
+  const PRODUCE_COMPILE_HINTS: int = 1 << 2;
+  const CONSUME_COMPILE_HINTS: int = 1 << 3;
+  // Consuming a code cache and eager compilation each exclude every other
+  // flag, and compile hints cannot be produced and consumed at once.
+  if compile_options & CONSUME_CODE_CACHE != 0
+    && compile_options != CONSUME_CODE_CACHE
+  {
+    return false;
+  }
+  if compile_options & EAGER_COMPILE != 0 && compile_options != EAGER_COMPILE {
+    return false;
+  }
+  let hints = PRODUCE_COMPILE_HINTS | CONSUME_COMPILE_HINTS;
+  compile_options & hints != hints
+}
+
+/// A stable id per script, assigned on first request from the same sequence
+/// as module script ids, so scripts and modules never share one.
+fn script_id_of(script: *const std::ffi::c_void) -> int {
+  let Some(key) = script_value_key(jsval_of(script as *const Value)) else {
+    return 0;
+  };
+  SCRIPT_IDS.with(|m| {
+    *m.borrow_mut()
+      .entry(key)
+      .or_insert_with(next_module_script_id)
+  })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Script__ScriptId(script: *const Script) -> int {
+  script_id_of(script as *const std::ffi::c_void)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__UnboundScript__ScriptId(
+  script: *const UnboundScript,
+) -> int {
+  script_id_of(script as *const std::ffi::c_void)
+}
+
 pub(crate) fn make_placeholder_code_cache() -> *mut CachedData<'static> {
   #[repr(C)]
   struct RawCachedData {
@@ -4190,7 +4287,7 @@ pub(crate) fn make_placeholder_code_cache() -> *mut CachedData<'static> {
     rejected: bool,
     buffer_policy: i32,
   }
-  let v = vec![0u8; 1].into_boxed_slice();
+  let v = code_cache_header().to_vec().into_boxed_slice();
   let len = v.len() as i32;
   let data = Box::into_raw(v) as *const u8;
   let boxed = Box::new(RawCachedData {
@@ -5820,6 +5917,13 @@ pub extern "C" fn v8__Module__IsGraphAsync(this: *const Module) -> bool {
     handle_key(this),
     &mut std::collections::HashSet::new(),
   )
+}
+
+/// Whether the module's own source uses top-level await. Unlike
+/// `IsGraphAsync` this ignores dependencies, and answers before instantiation.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Module__HasTopLevelAwait(this: *const Module) -> bool {
+  with_module_state(this, |m| !m.synthetic && m.is_async).unwrap_or(false)
 }
 
 #[unsafe(no_mangle)]

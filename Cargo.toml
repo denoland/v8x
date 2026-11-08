@@ -3,7 +3,7 @@
 # can run unmodified. Downstream crates should depend on this package under an
 # explicit alias when both rusty_v8 and v8x are available.
 name = "v8x"
-version = "152.1.0-rc.1"
+version = "158.0.0-rc.1"
 edition = "2024"
 authors = ["Divy Srivastava <me@littledivy.com>"]
 description = "Engine agnostic JavaScript"

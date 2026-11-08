@@ -1,15 +1,15 @@
 diff --git a/src/scope.rs b/src/scope.rs
-index 293e4b2..81ea7d3 100644
+index 8da79f7..c062c3f 100644
 --- a/src/scope.rs
 +++ b/src/scope.rs
-@@ -143,6 +143,7 @@ use std::{
+@@ -173,6 +173,7 @@ use std::{
    pin::Pin,
    ptr::NonNull,
  };
 +#[path = "scope/raw.rs"]
  pub(crate) mod raw;
  
- pub type PinScope<'s, 'i, C = Context> = PinnedRef<'s, HandleScope<'i, C>>;
+ /// Tracks which `Isolate` owns the scopes that are open on the current thread
 diff --git a/src/scope/raw.rs b/src/scope/raw.rs
 index 4e443c2..66d9c1e 100644
 --- a/src/scope/raw.rs

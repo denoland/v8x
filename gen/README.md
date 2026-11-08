@@ -1,14 +1,15 @@
 # gen/ — pre-generated rusty_v8 bindings
 
-Unmodified upstream release assets from
-https://github.com/denoland/rusty_v8/releases/tag/v152.1.0 (the bindgen output
+Unmodified upstream bindgen output for rusty_v8 v158.0.0 (V8 15.8), taken
+from the CI artifacts of https://github.com/denoland/rusty_v8/pull/2098 until
+the v158.0.0 release is tagged (the bindgen output
 rusty_v8's `binding.rs` includes via `RUSTY_V8_SRC_BINDING_PATH`; build.rs
 picks one per target). The C ABI symbols these declare are *defined* by our
 engine shims — only the declarations come from here.
 
 One file per OS family is enough: upstream publishes per-arch,
 debug/release, and simdutf variants, but within one OS family they are all
-byte-identical (verified by diffing the v152.1.0 assets). What actually varies
+byte-identical (verified by diffing the v158.0.0 assets). What actually varies
 across OS families:
 
 - mangled C++ `link_name`s: Itanium with a leading underscore on Apple,

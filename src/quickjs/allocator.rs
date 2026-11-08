@@ -129,6 +129,15 @@ pub extern "C" fn v8__ArrayBuffer__Allocator__NewDefaultAllocator()
   })) as *mut Allocator
 }
 
+/// Every isolate group can have its own allocator here (see
+/// `IsolateGroup::CanCreateNewGroups`), and they need no group-specific state.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__ArrayBuffer__Allocator__NewDefaultAllocator__with_group(
+  _group: *const super::isolate::IsolateGroupHandle,
+) -> *mut Allocator {
+  v8__ArrayBuffer__Allocator__NewDefaultAllocator()
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__ArrayBuffer__Allocator__NewRustAllocator(
   handle: *const c_void,

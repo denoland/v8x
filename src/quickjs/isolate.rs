@@ -13,7 +13,7 @@ use crate::{
 use std::mem::MaybeUninit;
 use std::os::raw::{c_char, c_int, c_void};
 use std::ptr;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 unsafe extern "C" {
   fn v82jsc_ensure_error_backtrace(ctx: *mut JSContext, error: JSValue);
@@ -259,6 +259,252 @@ unsafe extern "C" fn codegen_thrower(
   }
 }
 
+// --- `Isolate::SetModifyCodeGenerationFromStringsCallback`
+//
+// While codegen is disabled, or once an isolate has this callback, the
+// context's global `eval` is a gate (`codegen_eval_gate`) that wraps the
+// original. The gate follows V8's rule for when the callback is consulted:
+// only when the context disallows codegen, or when the source is not a string.
+// Calls through the gate are indirect evals, which only matters for code that
+// relies on a direct eval seeing local variables while one of the two is in
+// effect. `new Function` keeps the thrower above while codegen is disabled,
+// and consults the callback there too.
+
+/// The layout of `v8::ModifyCodeGenerationFromStringsResult`.
+#[repr(C)]
+pub(crate) struct ModifyCodeGenerationFromStringsResult {
+  codegen_allowed: bool,
+  modified_source: *const crate::String,
+}
+
+pub(crate) type ModifyCodeGenerationFromStringsCallback =
+  unsafe extern "C" fn(
+    context: *const Context,
+    source: *const Value,
+    is_code_like: bool,
+  ) -> ModifyCodeGenerationFromStringsResult;
+
+thread_local! {
+  // ctx -> (gate, the eval it wraps), both owning one ref.
+  static CODEGEN_GATES: std::cell::RefCell<
+    std::collections::HashMap<*mut JSContext, (JSValue, JSValue)>,
+  > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+fn codegen_disallowed(ctx: *mut JSContext) -> bool {
+  CODEGEN_DISABLED.with(|m| m.borrow().contains_key(&ctx))
+}
+
+fn modify_codegen_callback() -> Option<ModifyCodeGenerationFromStringsCallback>
+{
+  let iso = current_iso();
+  if iso.is_null() {
+    return None;
+  }
+  iso_state(iso).modify_codegen_callback
+}
+
+/// The real `eval` of `ctx`, borrowed.
+fn original_eval(ctx: *mut JSContext) -> Option<JSValue> {
+  CODEGEN_GATES
+    .with(|m| m.borrow().get(&ctx).map(|&(_, eval)| eval))
+    .or_else(|| {
+      CODEGEN_DISABLED.with(|m| m.borrow().get(&ctx).map(|&(eval, _)| eval))
+    })
+}
+
+/// Runs the embedder's callback on `source`. `Err(())` means codegen is
+/// blocked (or the callback threw); `Ok(Some(s))` is a replacement source.
+unsafe fn consult_codegen_callback(
+  ctx: *mut JSContext,
+  callback: ModifyCodeGenerationFromStringsCallback,
+  source: JSValue,
+) -> Result<Option<JSValue>, ()> {
+  let context = intern_ctx(ctx);
+  let source = intern_dup::<Value>(ctx, source);
+  let result = unsafe { callback(context, source, false) };
+  if unsafe { JS_HasException(ctx) } || !result.codegen_allowed {
+    return Err(());
+  }
+  if result.modified_source.is_null() {
+    Ok(None)
+  } else {
+    Ok(Some(jsval_of(result.modified_source)))
+  }
+}
+
+unsafe fn call_eval(
+  ctx: *mut JSContext,
+  eval: JSValue,
+  source: JSValue,
+) -> JSValue {
+  let mut args = [unsafe { JS_DupValue(ctx, source) }];
+  let r = unsafe { JS_Call(ctx, eval, jsv_undefined(), 1, args.as_mut_ptr()) };
+  unsafe { JS_FreeValue(ctx, args[0]) };
+  r
+}
+
+unsafe extern "C" fn codegen_eval_gate(
+  ctx: *mut JSContext,
+  this: JSValue,
+  argc: c_int,
+  argv: *mut JSValue,
+  _magic: c_int,
+  data: *mut JSValue,
+) -> JSValue {
+  let eval = unsafe { *data };
+  let source = if argc > 0 && !argv.is_null() {
+    unsafe { *argv }
+  } else {
+    jsv_undefined()
+  };
+  let is_string = jsv_is_string(&source);
+  let disallowed = codegen_disallowed(ctx);
+  let callback = modify_codegen_callback();
+  if !disallowed && (is_string || callback.is_none()) {
+    return unsafe { call_eval(ctx, eval, source) };
+  }
+  let Some(callback) = callback else {
+    // Disallowed without a callback. A non-string needs no code generation
+    // and comes back unchanged, as from `eval` itself.
+    if !is_string {
+      return unsafe { JS_DupValue(ctx, source) };
+    }
+    return unsafe { codegen_thrower(ctx, this, argc, argv) };
+  };
+  match unsafe { consult_codegen_callback(ctx, callback, source) } {
+    Err(()) if unsafe { JS_HasException(ctx) } => jsv_exception(),
+    Err(()) => unsafe { codegen_thrower(ctx, this, argc, argv) },
+    Ok(Some(modified)) => unsafe { call_eval(ctx, eval, modified) },
+    Ok(None) if is_string => unsafe { call_eval(ctx, eval, source) },
+    Ok(None) => unsafe { JS_DupValue(ctx, source) },
+  }
+}
+
+/// `new Function` while codegen is disabled. Consults the callback with the
+/// source V8 would compile, and builds the function with the saved original.
+unsafe extern "C" fn codegen_function_thrower(
+  ctx: *mut JSContext,
+  this: JSValue,
+  argc: c_int,
+  argv: *mut JSValue,
+) -> JSValue {
+  let Some(callback) = modify_codegen_callback() else {
+    return unsafe { codegen_thrower(ctx, this, argc, argv) };
+  };
+  let args: &[JSValue] = if argc > 0 && !argv.is_null() {
+    unsafe { std::slice::from_raw_parts(argv, argc as usize) }
+  } else {
+    &[]
+  };
+  let mut parts = Vec::with_capacity(args.len());
+  for &arg in args {
+    let mut len = 0usize;
+    let p = unsafe { JS_ToCStringLen(ctx, &mut len, arg) };
+    if p.is_null() {
+      return jsv_exception();
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(p as *const u8, len) };
+    parts.push(std::string::String::from_utf8_lossy(bytes).into_owned());
+    unsafe { JS_FreeCString(ctx, p) };
+  }
+  let body = parts.pop().unwrap_or_default();
+  let text = format!(
+    "(function anonymous({}\n) {{\n{}\n}})",
+    parts.join(","),
+    body
+  );
+  let source =
+    unsafe { JS_NewStringLen(ctx, text.as_ptr() as *const c_char, text.len()) };
+  let verdict = unsafe { consult_codegen_callback(ctx, callback, source) };
+  let result = match verdict {
+    Err(()) if unsafe { JS_HasException(ctx) } => jsv_exception(),
+    Err(()) => unsafe { codegen_thrower(ctx, this, argc, argv) },
+    Ok(Some(modified)) => match original_eval(ctx) {
+      Some(eval) => unsafe { call_eval(ctx, eval, modified) },
+      None => unsafe { codegen_thrower(ctx, this, argc, argv) },
+    },
+    Ok(None) => {
+      let func =
+        CODEGEN_DISABLED.with(|m| m.borrow().get(&ctx).map(|&(_, f)| f));
+      match func {
+        Some(func) => unsafe { JS_CallConstructor(ctx, func, argc, argv) },
+        None => unsafe { codegen_thrower(ctx, this, argc, argv) },
+      }
+    }
+  };
+  unsafe { JS_FreeValue(ctx, source) };
+  result
+}
+
+/// Makes the global `eval` of `ctx` the gate, unless it already is.
+pub(crate) fn ensure_codegen_gate(ctx: *mut JSContext) {
+  if ctx.is_null() {
+    return;
+  }
+  unsafe {
+    let global = JS_GetGlobalObject(ctx);
+    let current = JS_GetPropertyStr(ctx, global, c"eval".as_ptr());
+    let is_gate = CODEGEN_GATES.with(|m| {
+      m.borrow()
+        .get(&ctx)
+        .is_some_and(|&(gate, _)| jsv_get_ptr(&gate) == jsv_get_ptr(&current))
+    });
+    if is_gate || !JS_IsFunction(ctx, current) {
+      JS_FreeValue(ctx, current);
+      JS_FreeValue(ctx, global);
+      return;
+    }
+    let mut data = [current];
+    let gate =
+      JS_NewCFunctionData(ctx, codegen_eval_gate, 1, 0, 1, data.as_mut_ptr());
+    if gate.tag == JS_TAG_EXCEPTION {
+      JS_FreeValue(ctx, current);
+      JS_FreeValue(ctx, global);
+      super::exception::clear_pending(ctx);
+      return;
+    }
+    JS_SetPropertyStr(ctx, global, c"eval".as_ptr(), JS_DupValue(ctx, gate));
+    JS_FreeValue(ctx, global);
+    let previous =
+      CODEGEN_GATES.with(|m| m.borrow_mut().insert(ctx, (gate, current)));
+    if let Some((old_gate, old_eval)) = previous {
+      JS_FreeValue(ctx, old_gate);
+      JS_FreeValue(ctx, old_eval);
+    }
+  }
+}
+
+/// Called for every new context: an isolate with a codegen callback gates
+/// `eval` from the start.
+pub(crate) fn install_codegen_gate_if_needed(
+  isolate: *mut RealIsolate,
+  ctx: *mut JSContext,
+) {
+  if !isolate.is_null() && iso_state(isolate).modify_codegen_callback.is_some()
+  {
+    ensure_codegen_gate(ctx);
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Isolate__SetModifyCodeGenerationFromStringsCallback(
+  isolate: *mut RealIsolate,
+  callback: ModifyCodeGenerationFromStringsCallback,
+) {
+  if isolate.is_null() {
+    return;
+  }
+  let st = iso_state(isolate);
+  st.modify_codegen_callback = Some(callback);
+  let contexts: Vec<*mut JSContext> = std::iter::once(st.ctx)
+    .chain(st.extra_contexts.iter().copied())
+    .collect();
+  for ctx in contexts {
+    ensure_codegen_gate(ctx);
+  }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Context__AllowCodeGenerationFromStrings(
   this: *const Context,
@@ -288,15 +534,14 @@ pub extern "C" fn v8__Context__AllowCodeGenerationFromStrings(
       // Save the current bindings (owning a ref each) so we can restore them.
       let saved_eval = JS_GetPropertyStr(ctx, global, c"eval".as_ptr());
       let saved_func = JS_GetPropertyStr(ctx, global, c"Function".as_ptr());
-      let thrower_eval =
-        JS_NewCFunction(ctx, codegen_thrower, c"eval".as_ptr(), 1);
       let thrower_func =
-        JS_NewCFunction(ctx, codegen_thrower, c"Function".as_ptr(), 1);
-      JS_SetPropertyStr(ctx, global, c"eval".as_ptr(), thrower_eval);
+        JS_NewCFunction(ctx, codegen_function_thrower, c"Function".as_ptr(), 1);
       JS_SetPropertyStr(ctx, global, c"Function".as_ptr(), thrower_func);
       JS_FreeValue(ctx, global);
       CODEGEN_DISABLED
         .with(|m| m.borrow_mut().insert(ctx, (saved_eval, saved_func)));
+      // The gate throws while the context is in CODEGEN_DISABLED.
+      ensure_codegen_gate(ctx);
     }
   }
 }
@@ -321,6 +566,15 @@ pub(crate) fn codegen_release_ctx(ctx: *mut JSContext) {
     unsafe {
       JS_FreeValue(ctx, eval);
       JS_FreeValue(ctx, func);
+    }
+  }
+  TEMPORAL_NOW_CALLBACKS.with(|m| m.borrow_mut().remove(&ctx));
+  if let Some((gate, eval)) =
+    CODEGEN_GATES.with(|m| m.borrow_mut().remove(&ctx))
+  {
+    unsafe {
+      JS_FreeValue(ctx, gate);
+      JS_FreeValue(ctx, eval);
     }
   }
 }
@@ -634,20 +888,85 @@ type JSPromiseHookType = i32;
 
 struct MicrotaskQueueState {
   _policy: MicrotasksPolicy,
+  /// One for the owning handle (or, for the default queue, the isolate) and
+  /// one per context the queue is associated with: as in V8, a context keeps
+  /// its queue alive after the embedder drops its handle.
+  refs: AtomicUsize,
+  /// The isolate the queue was created for. Microtasks run on the isolate's
+  /// QuickJS job queue, so this is all that ties a queue to its isolate.
+  isolate: *mut RealIsolate,
 }
 
 pub(crate) fn new_microtask_queue_state(
   policy: MicrotasksPolicy,
 ) -> *mut MicrotaskQueue {
-  Box::into_raw(Box::new(MicrotaskQueueState { _policy: policy }))
-    as *mut MicrotaskQueue
+  Box::into_raw(Box::new(MicrotaskQueueState {
+    _policy: policy,
+    refs: AtomicUsize::new(1),
+    isolate: ptr::null_mut(),
+  })) as *mut MicrotaskQueue
 }
 
-pub(crate) unsafe fn drop_microtask_queue_state(queue: *mut MicrotaskQueue) {
+fn retain_microtask_queue(queue: *mut MicrotaskQueue) {
   if !queue.is_null() {
     unsafe {
-      drop(Box::from_raw(queue as *mut MicrotaskQueueState));
-    }
+      (*(queue as *mut MicrotaskQueueState))
+        .refs
+        .fetch_add(1, Ordering::AcqRel)
+    };
+  }
+}
+
+/// Associates `ctx` with `queue`, releasing the queue it had before.
+pub(crate) fn associate_microtask_queue(
+  st: &mut super::core::IsoState,
+  ctx: usize,
+  queue: *mut MicrotaskQueue,
+) {
+  retain_microtask_queue(queue);
+  if let Some(old) = st.context_microtask_queues.insert(ctx, queue) {
+    unsafe { drop_microtask_queue_state(old) };
+  }
+}
+
+pub(crate) fn dissociate_microtask_queue(
+  st: &mut super::core::IsoState,
+  ctx: usize,
+) {
+  if let Some(old) = st.context_microtask_queues.remove(&ctx) {
+    unsafe { drop_microtask_queue_state(old) };
+  }
+}
+
+pub(crate) fn set_microtask_queue_isolate(
+  queue: *mut MicrotaskQueue,
+  isolate: *mut RealIsolate,
+) {
+  if !queue.is_null() {
+    unsafe { (*(queue as *mut MicrotaskQueueState)).isolate = isolate };
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__MicrotaskQueue__BelongsTo(
+  queue: *const MicrotaskQueue,
+  isolate: *mut RealIsolate,
+) -> bool {
+  if queue.is_null() || isolate.is_null() {
+    return false;
+  }
+  let owner = unsafe { (*(queue as *const MicrotaskQueueState)).isolate };
+  owner.is_null() || owner == isolate
+}
+
+/// Releases one reference to `queue`, freeing it with the last.
+pub(crate) unsafe fn drop_microtask_queue_state(queue: *mut MicrotaskQueue) {
+  if queue.is_null() {
+    return;
+  }
+  let state = queue as *mut MicrotaskQueueState;
+  if unsafe { (*state).refs.fetch_sub(1, Ordering::AcqRel) } == 1 {
+    unsafe { drop(Box::from_raw(state)) };
   }
 }
 
@@ -1044,6 +1363,9 @@ pub(crate) unsafe extern "C" fn terminate_interrupt_handler(
   rt: *mut JSRuntime,
   opaque: *mut c_void,
 ) -> c_int {
+  if super::object::regexp_budget_exhausted() {
+    return 1;
+  }
   let iso = opaque as *mut RealIsolate;
   if iso.is_null() {
     return 0;
@@ -1546,10 +1868,12 @@ pub extern "C" fn v8__Isolate__GetEnteredOrMicrotaskContext(
 /// the queue pointer and `Get` is the identity.
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__MicrotaskQueueHandle__New(
-  _isolate: *mut RealIsolate,
+  isolate: *mut RealIsolate,
   policy: MicrotasksPolicy,
 ) -> *mut MicrotaskQueue {
-  new_microtask_queue_state(policy)
+  let queue = new_microtask_queue_state(policy);
+  set_microtask_queue_isolate(queue, isolate);
+  queue
 }
 
 #[unsafe(no_mangle)]
@@ -1956,6 +2280,9 @@ pub extern "C" fn v8__Context__GetMicrotaskQueue(
     return ptr::null();
   }
   let st = iso_state(iso);
+  if st.detached_contexts.contains(&(ctx as usize)) {
+    return ptr::null();
+  }
   st.context_microtask_queues
     .get(&(ctx as usize))
     .copied()
@@ -1977,10 +2304,13 @@ pub extern "C" fn v8__Context__SetMicrotaskQueue(
   }
   let st = iso_state(iso);
   if microtask_queue.is_null() {
-    st.context_microtask_queues.remove(&(ctx as usize));
+    dissociate_microtask_queue(st, ctx as usize);
   } else {
-    st.context_microtask_queues
-      .insert(ctx as usize, microtask_queue as *mut MicrotaskQueue);
+    associate_microtask_queue(
+      st,
+      ctx as usize,
+      microtask_queue as *mut MicrotaskQueue,
+    );
   }
 }
 
@@ -2178,4 +2508,240 @@ pub extern "C" fn v8__Isolate__SetUseCounterCallback(
     return;
   }
   iso_state(isolate).use_counter_callback = Some(callback);
+}
+
+// --- IsolateGroup
+//
+// QuickJS runtimes share nothing, so there is no cage or sandbox to partition
+// and any number of groups can exist. A group is a reference count; the
+// default group is a static that is never freed. Each isolate holds one
+// reference to its group, released on dispose.
+
+pub(crate) struct IsolateGroupInner {
+  refcount: AtomicUsize,
+}
+
+static DEFAULT_ISOLATE_GROUP: IsolateGroupInner = IsolateGroupInner {
+  refcount: AtomicUsize::new(1),
+};
+
+/// The layout of rusty_v8's `IsolateGroup`: one pointer to the group.
+#[repr(C)]
+pub struct IsolateGroupHandle(*const IsolateGroupInner);
+
+pub(crate) fn default_isolate_group() -> *const IsolateGroupInner {
+  &DEFAULT_ISOLATE_GROUP
+}
+
+fn acquire_isolate_group(
+  group: *const IsolateGroupInner,
+) -> *const IsolateGroupInner {
+  if !group.is_null() {
+    unsafe { (*group).refcount.fetch_add(1, Ordering::AcqRel) };
+  }
+  group
+}
+
+pub(crate) fn release_isolate_group(group: *const IsolateGroupInner) {
+  if group.is_null() || ptr::eq(group, default_isolate_group()) {
+    return;
+  }
+  if unsafe { (*group).refcount.fetch_sub(1, Ordering::AcqRel) } == 1 {
+    drop(unsafe { Box::from_raw(group as *mut IsolateGroupInner) });
+  }
+}
+
+fn group_of(handle: *const IsolateGroupHandle) -> *const IsolateGroupInner {
+  if handle.is_null() {
+    return ptr::null();
+  }
+  unsafe { (*handle).0 }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__IsolateGroup__GetDefault() -> *const IsolateGroupInner {
+  acquire_isolate_group(default_isolate_group())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__IsolateGroup__CanCreateNewGroups() -> bool {
+  true
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__IsolateGroup__Create() -> *const IsolateGroupInner {
+  Box::into_raw(Box::new(IsolateGroupInner {
+    refcount: AtomicUsize::new(1),
+  }))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__IsolateGroup__CLONE(
+  this: *const IsolateGroupHandle,
+) -> *const IsolateGroupInner {
+  acquire_isolate_group(group_of(this))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__IsolateGroup__DESTRUCT(this: *mut IsolateGroupHandle) {
+  release_isolate_group(group_of(this));
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__IsolateGroup__EQ(
+  this: *const IsolateGroupHandle,
+  other: *const IsolateGroupHandle,
+) -> bool {
+  ptr::eq(group_of(this), group_of(other))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Isolate__GetGroup(
+  isolate: *const RealIsolate,
+) -> *const IsolateGroupInner {
+  if isolate.is_null() {
+    return acquire_isolate_group(default_isolate_group());
+  }
+  acquire_isolate_group(iso_state(isolate as *mut RealIsolate).group)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Isolate__NewInGroup(
+  group: *const IsolateGroupHandle,
+  params: *const c_void,
+) -> *mut RealIsolate {
+  let isolate = super::core::v8__Isolate__New(params);
+  let group = group_of(group);
+  if !isolate.is_null() && !group.is_null() {
+    let st = iso_state(isolate);
+    release_isolate_group(st.group);
+    st.group = acquire_isolate_group(group);
+  }
+  isolate
+}
+
+/// V8 uses this as a hint that a context went away, to schedule a GC sooner.
+/// QuickJS frees most garbage by reference counting as soon as it is
+/// unreachable, and its cycle collector runs on its own allocation schedule,
+/// so there is nothing to bring forward.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Isolate__ContextDisposedNotification(
+  _isolate: *mut RealIsolate,
+  _dependants: crate::ContextDependants,
+) {
+}
+
+/// QuickJS cannot move a global object to another context, so the detached
+/// context keeps it. What does carry over is the rest of V8's contract: the
+/// context loses its microtask queue and its security token resets.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Context__DetachGlobal(this: *const Context) {
+  let ctx = ctx_of(this);
+  let iso = current_iso();
+  if ctx.is_null() || iso.is_null() {
+    return;
+  }
+  let st = iso_state(iso);
+  st.detached_contexts.insert(ctx as usize);
+  dissociate_microtask_queue(st, ctx as usize);
+  super::misc::v8__Context__UseDefaultSecurityToken(this);
+}
+
+// --- Temporal host clock
+//
+// `Temporal.Now` comes from the bundled polyfill, which reads the clock
+// through `Date.now()`. Setting a callback replaces the `Temporal.Now` methods
+// on that context with versions that read the callback's nanoseconds instead.
+
+pub(crate) type TemporalNowCallback =
+  unsafe extern "C" fn(context: *const Context) -> i64;
+
+thread_local! {
+  static TEMPORAL_NOW_CALLBACKS: std::cell::RefCell<
+    std::collections::HashMap<*mut JSContext, TemporalNowCallback>,
+  > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+unsafe extern "C" fn temporal_host_now_ns(
+  ctx: *mut JSContext,
+  _this: JSValue,
+  _argc: c_int,
+  _argv: *mut JSValue,
+) -> JSValue {
+  let callback = TEMPORAL_NOW_CALLBACKS.with(|m| m.borrow().get(&ctx).copied());
+  let Some(callback) = callback else {
+    return unsafe {
+      JS_ThrowTypeError(ctx, c"Temporal host clock is not set".as_ptr())
+    };
+  };
+  let ns = unsafe { callback(intern_ctx(ctx)) };
+  unsafe { JS_NewBigInt64(ctx, ns) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Context__SetTemporalHostSystemUTCEpochNanosecondsCallback(
+  this: *const Context,
+  callback: TemporalNowCallback,
+) {
+  let ctx = ctx_of(this);
+  if ctx.is_null() {
+    return;
+  }
+  let already = TEMPORAL_NOW_CALLBACKS
+    .with(|m| m.borrow_mut().insert(ctx, callback).is_some());
+  if already {
+    return;
+  }
+  const SRC: &str = concat!(
+    r#"(function (nowNs) {
+    const T = globalThis.Temporal;
+    if (!T || !T.Now || !T.Instant) return;
+    const N = T.Now;
+    const zone = typeof N.timeZoneId === "function"
+      ? () => N.timeZoneId() : () => "UTC";
+    const now = () => T.Instant.fromEpochNanoseconds(nowNs());
+    const zoned = (z) => now().toZonedDateTimeISO(z === undefined ? zone() : z);
+    const methods = {
+      instant() { return now(); },
+      zonedDateTimeISO(z) { return zoned(z); },
+      plainDateTimeISO(z) { return zoned(z).toPlainDateTime(); },
+      plainDateISO(z) { return zoned(z).toPlainDate(); },
+      plainTimeISO(z) { return zoned(z).toPlainTime(); },
+    };
+    for (const name of Object.keys(methods)) {
+      Object.defineProperty(N, name, {
+        value: methods[name], writable: true, configurable: true,
+      });
+    }
+  })"#,
+    "\0"
+  );
+  unsafe {
+    let installer = JS_Eval(
+      ctx,
+      SRC.as_ptr() as *const c_char,
+      SRC.len() - 1,
+      c"<temporal-host-clock>".as_ptr(),
+      JS_EVAL_TYPE_GLOBAL,
+    );
+    if installer.tag == JS_TAG_EXCEPTION {
+      super::exception::clear_pending(ctx);
+      return;
+    }
+    let now = JS_NewCFunction(
+      ctx,
+      temporal_host_now_ns,
+      c"temporalHostNow".as_ptr(),
+      0,
+    );
+    let mut args = [now];
+    let r = JS_Call(ctx, installer, jsv_undefined(), 1, args.as_mut_ptr());
+    JS_FreeValue(ctx, args[0]);
+    JS_FreeValue(ctx, installer);
+    if r.tag == JS_TAG_EXCEPTION {
+      super::exception::clear_pending(ctx);
+    } else {
+      JS_FreeValue(ctx, r);
+    }
+  }
 }

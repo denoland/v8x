@@ -505,6 +505,69 @@ pub extern "C" fn v8__Date__ValueOf(this: *const crate::Date) -> f64 {
   }
 }
 
+/// `Date.parse` followed by `new Date`, which is what V8's `Date::Parse` does:
+/// an unparsable string yields a Date whose time value is NaN.
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Date__Parse(
+  context: *const Context,
+  date_string: *const V8String,
+) -> *const crate::Date {
+  if context.is_null() || date_string.is_null() {
+    return ptr::null();
+  }
+  let ctx = ctx_of(context) as JSContextRef;
+  match unsafe {
+    crate::jsc::core::call_js_fn(
+      ctx,
+      c"(function(s){return new Date(Date.parse(s))})",
+      &[jsval(date_string)],
+    )
+  } {
+    Ok(d) => intern_ctx::<crate::Date>(ctx, d),
+    Err(exc) => {
+      crate::jsc::core::record_pending_exception(ctx, exc);
+      ptr::null()
+    }
+  }
+}
+
+/// Runs one of the Date-to-string conversions V8 exposes as infallible.
+/// `src` must not throw for a NaN date, which V8 formats as "Invalid Date".
+fn date_to_string(
+  this: *const crate::Date,
+  src: &std::ffi::CStr,
+) -> *const V8String {
+  let ctx = current_ctx();
+  if ctx.is_null() || this.is_null() {
+    return ptr::null();
+  }
+  match unsafe { crate::jsc::core::call_js_fn(ctx, src, &[jsval(this)]) } {
+    Ok(v) => intern_ctx::<V8String>(ctx, v),
+    Err(_) => ptr::null(),
+  }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Date__ToISOString(
+  this: *const crate::Date,
+) -> *const V8String {
+  date_to_string(
+    this,
+    c"(function(d){var t=Date.prototype.valueOf.call(d);\
+       return t!==t?'Invalid Date':Date.prototype.toISOString.call(d)})",
+  )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn v8__Date__ToUTCString(
+  this: *const crate::Date,
+) -> *const V8String {
+  date_to_string(
+    this,
+    c"(function(d){return Date.prototype.toUTCString.call(d)})",
+  )
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Proxy__GetHandler(this: *const c_void) -> *const Value {
   // Native read of ProxyObject::handler() (introspect.cpp) — JSC's C API has

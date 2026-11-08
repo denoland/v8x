@@ -67,6 +67,91 @@ pub extern "C" fn icu_get_default_locale(
   n
 }
 
+// The default time zone lives in ICU, which JavaScriptCore consults for
+// local time: both the system framework and the vendored build use Apple's
+// libicucore, whose C API is exported without version suffixes.
+#[link(name = "icucore")]
+unsafe extern "C" {
+  fn ucal_getDefaultTimeZone(
+    result: *mut u16,
+    result_capacity: i32,
+    ec: *mut i32,
+  ) -> i32;
+  fn ucal_setDefaultTimeZone(zone_id: *const u16, ec: *mut i32);
+  fn ucal_getCanonicalTimeZoneID(
+    id: *const u16,
+    len: i32,
+    result: *mut u16,
+    result_capacity: i32,
+    is_system_id: *mut i8,
+    status: *mut i32,
+  ) -> i32;
+}
+
+/// ICU's `U_FAILURE`: warnings are negative, errors positive.
+fn icu_failed(status: i32) -> bool {
+  status > 0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn icu_get_default_time_zone(
+  output: *mut c_char,
+  output_len: usize,
+) -> usize {
+  let mut buf = [0u16; 128];
+  let mut status = 0;
+  let n = unsafe {
+    ucal_getDefaultTimeZone(buf.as_mut_ptr(), buf.len() as i32, &mut status)
+  };
+  if icu_failed(status) || n < 0 || output.is_null() {
+    return 0;
+  }
+  let id = String::from_utf16_lossy(&buf[..(n as usize).min(buf.len())]);
+  // Like ICU's `CheckedArrayByteSink`, write what fits and report that.
+  let len = id.len().min(output_len);
+  unsafe {
+    std::ptr::copy_nonoverlapping(id.as_ptr() as *const c_char, output, len)
+  };
+  len
+}
+
+/// Installs `time_zone_id` as ICU's default if ICU recognizes it. Like
+/// rusty_v8's ICU binding, ICU's "unknown" zone counts as unrecognized.
+#[unsafe(no_mangle)]
+pub extern "C" fn icu_set_default_time_zone(
+  time_zone_id: *const c_char,
+) -> bool {
+  if time_zone_id.is_null() {
+    return false;
+  }
+  let id = unsafe { std::ffi::CStr::from_ptr(time_zone_id) }.to_string_lossy();
+  let mut units: Vec<u16> = id.encode_utf16().collect();
+  let mut canonical = [0u16; 128];
+  let mut is_system = 0i8;
+  let mut status = 0;
+  let n = unsafe {
+    ucal_getCanonicalTimeZoneID(
+      units.as_ptr(),
+      units.len() as i32,
+      canonical.as_mut_ptr(),
+      canonical.len() as i32,
+      &mut is_system,
+      &mut status,
+    )
+  };
+  if icu_failed(status) || n <= 0 {
+    return false;
+  }
+  let unknown: Vec<u16> = "Etc/Unknown".encode_utf16().collect();
+  if canonical[..(n as usize).min(canonical.len())] == unknown[..] {
+    return false;
+  }
+  units.push(0);
+  let mut status = 0;
+  unsafe { ucal_setDefaultTimeZone(units.as_ptr(), &mut status) };
+  !icu_failed(status)
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn v8__Isolate__AddNearHeapLimitCallback(
   isolate: *mut c_void,
